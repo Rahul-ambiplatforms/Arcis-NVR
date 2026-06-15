@@ -49,9 +49,9 @@ fun LoginScreen(
     var remote      by remember { mutableStateOf(false) }
 
     // LAN form state
-    var host        by remember { mutableStateOf("192.168.12.253") }
-    var port        by remember { mutableStateOf("80") }
-    var lanUser     by remember { mutableStateOf("admin") }
+    var host        by remember { mutableStateOf("") }
+    var port        by remember { mutableStateOf("") }
+    var lanUser     by remember { mutableStateOf("") }
     var lanPass     by remember { mutableStateOf("") }
     var lanPassVis  by remember { mutableStateOf(false) }
 
@@ -133,6 +133,7 @@ fun LoginScreen(
                         OutlinedTextField(
                             value = host, onValueChange = { host = it.trim() },
                             label = { Text("NVR IP address") }, singleLine = true,
+                            placeholder = { Text("e.g. 192.168.1.1") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -140,6 +141,7 @@ fun LoginScreen(
                         OutlinedTextField(
                             value = port, onValueChange = { port = it.filter(Char::isDigit) },
                             label = { Text("HTTP port") }, singleLine = true,
+                            placeholder = { Text("e.g. 80 or 8080") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -147,6 +149,7 @@ fun LoginScreen(
                         OutlinedTextField(
                             value = lanUser, onValueChange = { lanUser = it },
                             label = { Text("Username") }, singleLine = true,
+                            placeholder = { Text("admin") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                         )

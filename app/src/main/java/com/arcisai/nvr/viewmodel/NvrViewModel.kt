@@ -1,7 +1,9 @@
 package com.arcisai.nvr.viewmodel
 
 import android.app.Application
+import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -18,6 +20,7 @@ import com.arcisai.nvr.net.LoginRequest
 import com.arcisai.nvr.net.NetSdkApi
 import com.arcisai.nvr.net.NetSdkException
 import com.arcisai.nvr.net.OnvifDiscovery
+import com.arcisai.nvr.net.OnvifResolver
 import com.arcisai.nvr.net.PublisherApi
 import com.arcisai.nvr.net.PtzClient
 import com.arcisai.nvr.net.RtspTlsProxy
@@ -27,6 +30,7 @@ import com.arcisai.nvr.p2p.RemoteSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
@@ -72,8 +76,19 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var abdListError by mutableStateOf<String?>(null)
         private set
+    /** deviceIds we've actually reached over P2P this app session. The cloud
+     *  backend's `status` is often stale ("offline" even when the NVR's P2P
+     *  provider is live), so the My-NVRs list also treats a device as online
+     *  if we've connected to it — i.e. "if it connects, it's online". */
+    var sessionOnlineIds by mutableStateOf<Set<String>>(emptySet())
+        private set
     /** Status message shown on Login + My-NVRs screens (snackbar-style). */
     var accountStatus by mutableStateOf<String?>(null)
+
+    /** Destination the app should open on cold start.
+     *  Null while the session-restore check is in flight (show a loading screen). */
+    var startDestination by mutableStateOf<String?>(null)
+        private set
 
     // Channels list (Home screen)
     var channels by mutableStateOf<List<ChannelInfo>>(emptyList())
@@ -123,7 +138,20 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             sessions.remove(creds.deviceId)?.let { runCatching { it.close() } }
             val perChan = sessions.keys.filter { it.startsWith("${creds.deviceId}-") }
             for (k in perChan) sessions.remove(k)?.let { runCatching { it.close() } }
+            // Tear down the streaming-side tunnels too so live/playback resume
+            // cleanly after the NVR comes back. They self-heal lazily on the next
+            // stream fetch (isAlive check), but a dead-but-not-yet-reaped tunnel
+            // would otherwise serve one stalled request first.
+            publisherTunnel?.let { runCatching { it.close() } }; publisherTunnel = null
+            replayTunnel?.let { runCatching { it.close() } }; replayTunnel = null
 
+            // Bail if the user logged out / switched NVR before we got here —
+            // otherwise we'd resurrect a P2P session the user just tore down
+            // (leaving it "active" on the signaling server and blocking re-login).
+            if (credentials?.deviceId != creds.deviceId) {
+                android.util.Log.i("NvrViewModel", "attemptReconnectMain: aborted — creds changed")
+                return
+            }
             val ns = RemoteSession(creds.deviceId, remoteConfig)
             val ok = ns.connect()
             if (!ok) {
@@ -131,12 +159,20 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.w("NvrViewModel", "attemptReconnectMain: connect() returned false")
                 return
             }
+            // Re-check after the (slow) connect: logout may have happened during it.
+            if (credentials?.deviceId != creds.deviceId) {
+                android.util.Log.i("NvrViewModel", "attemptReconnectMain: discarding — logged out during connect")
+                ns.close()
+                return
+            }
             sessions[creds.deviceId] = ns
             val tunnelCreds = creds.copy(host = "127.0.0.1", port = ns.localPort)
             api = NetSdkApi(tunnelCreds)
             android.util.Log.i("NvrViewModel", "attemptReconnectMain: ok, new port=${ns.localPort}")
+            nvrOnline = true
             refreshChannels()
             loadIpCamInfo()
+            loadConnectedChannels()
         } catch (t: Throwable) {
             android.util.Log.e("NvrViewModel", "attemptReconnectMain failed: ${t.message}", t)
         } finally {
@@ -144,13 +180,16 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Manual "Retry now" — kicks an immediate reconnect attempt off the 5 s
+     *  polling cadence (e.g. from the offline banner's Retry button). No-op in
+     *  LAN mode or when already reconnecting (guarded inside). */
+    fun reconnectNow() {
+        val creds = credentials ?: return
+        if (!creds.remote) return
+        viewModelScope.launch { attemptReconnectMain(creds) }
+    }
+
     init {
-        // Auto-load any persisted creds. In Remote mode we lazy-connect the
-        // HTTP session in login().
-        store.load()?.let { creds ->
-            credentials = creds
-            if (!creds.remote) api = NetSdkApi(creds)
-        }
         // Restore last-known channels + ipCamInfo from disk so the UI never
         // flashes "no cameras attached" while a fresh fetch is in flight.
         runCatching {
@@ -158,6 +197,41 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 val arr = JSONArray(js)
                 ipCamInfo = padIpCamInfo(arr, maxChannels)
                 channels = padChannels(parseIpCamInfo(arr), maxChannels)
+            }
+        }
+
+        // Auto-restore the last session so the user is not forced back to the
+        // login screen every time the app is opened (they stay logged in until
+        // they explicitly tap Logout).
+        viewModelScope.launch {
+            // Always guarantee startDestination is set — an unhandled exception
+            // here would leave it null and the loading screen would never navigate.
+            try {
+                val saved = store.load()
+                if (saved == null) {
+                    startDestination = "login"
+                    return@launch
+                }
+                if (!saved.remote) {
+                    // LAN: credentials are enough — no network call needed for navigation.
+                    credentials = saved
+                    api = NetSdkApi(saved)
+                    startDestination = "main"
+                } else {
+                    // Cloud: verify the persisted cookie is still valid.
+                    startDestination = try {
+                        val resp = cloudApi.getAbd()
+                        if (resp.success) {
+                            accountSignedIn = true
+                            myAbds = resp.data
+                            accountEmail = saved.accountEmail.ifBlank { null }
+                            accountName  = saved.accountName.ifBlank { null }
+                            "my_nvrs"
+                        } else "login"
+                    } catch (_: Throwable) { "login" }
+                }
+            } catch (_: Throwable) {
+                startDestination = "login"
             }
         }
     }
@@ -169,25 +243,44 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (creds.remote) {
-                    remoteStatus = "Opening P2P tunnel…"
-                    val session = RemoteSession(creds.deviceId, remoteConfig)
-                    val ok = session.connect()
-                    if (!ok) {
-                        remoteStatus = null
-                        loginStatus = "Could not reach NVR via P2P (signaling-server or ICE failed)"
-                        session.close()
-                        return@launch
+                    // Retry with back-off: right after a logout the device provider
+                    // can still hold the previous consumer for ~30–60 s and either
+                    // refuse the new ICE or let it connect but stall the first HTTP
+                    // probe. Closing + waiting + retrying rides over that window
+                    // (fixes the "re-login → stream won't start" case, K1).
+                    var connected = false
+                    var lastErr: String? = null
+                    for (attempt in 1..3) {
+                        remoteStatus = if (attempt == 1) "Opening P2P tunnel…"
+                                       else "Reconnecting P2P… ($attempt/3)"
+                        val session = RemoteSession(creds.deviceId, remoteConfig)
+                        if (!session.connect()) {
+                            session.close(); lastErr = "signaling/ICE failed"
+                        } else {
+                            try {
+                                val a = NetSdkApi(creds.copy(host = "127.0.0.1", port = session.localPort))
+                                a.network()  // sanity probe through the tunnel
+                                sessions[creds.deviceId] = session
+                                store.save(creds)
+                                credentials = creds
+                                api = a
+                                sessionOnlineIds = sessionOnlineIds + creds.deviceId
+                                remoteStatus = "Connected via P2P"
+                                loadOrdinary()
+                                onSuccess()
+                                connected = true
+                                break
+                            } catch (t: Throwable) {
+                                lastErr = t.message ?: "tunnel probe failed"
+                                session.close()  // free the consumer so the retry is clean
+                            }
+                        }
+                        if (attempt < 3) kotlinx.coroutines.delay(2500L * attempt)
                     }
-                    sessions[creds.deviceId] = session
-                    val tunnelCreds = creds.copy(host = "127.0.0.1", port = session.localPort)
-                    val a = NetSdkApi(tunnelCreds)
-                    a.network()  // sanity probe through the tunnel
-                    store.save(creds)
-                    credentials = creds
-                    api = a
-                    remoteStatus = "Connected via P2P"
-                    loadOrdinary()
-                    onSuccess()
+                    if (!connected) {
+                        remoteStatus = null
+                        loginStatus = "Could not reach NVR via P2P: ${lastErr ?: "timeout"}"
+                    }
                 } else {
                     val a = NetSdkApi(creds)
                     a.network()
@@ -218,6 +311,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         accountEmail = null
         myAbds = emptyList()
         abdListError = null
+        startDestination = "login"
     }
 
     /**
@@ -237,6 +331,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         publisherTunnel?.let { runCatching { it.close() } }
         publisherTunnel = null
         publisherApiInstance = null
+        replayTunnel?.let { runCatching { it.close() } }
+        replayTunnel = null
         store.clear()
         cache.clear()
         credentials = null
@@ -244,6 +340,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         channels = emptyList()
         ipCamInfo = null
         remoteStatus = null
+        discovered.clear()
+        discoveryMisses.clear()
+        searchResults = null
     }
 
     // ---- Arcis cloud (Remote-mode account flow) --------------------------
@@ -483,10 +582,41 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         val routed = if (creds.remote) {
             val rtspPort = ensureChannelRtspTunnel(channelId) ?: return null
             rewriteUrlHost(resolved.url, "127.0.0.1", rtspPort)
-        } else resolved.url
+        } else {
+            // LAN: for ONVIF cameras whose RTSP is directly reachable, ask the
+            // camera itself (ONVIF GetStreamUri) for the correct path + creds
+            // instead of trusting the publisher's generic /ch0_<n>.264 template.
+            // Cameras only reachable via the NVR fall back to the publisher URL.
+            onvifDirectStreamUrl(channelId, stream) ?: resolved.url
+        }
 
         return maybeWrapTls(routed, channelId)
     }
+
+    /** LAN-only ONVIF self-resolution. Returns null (→ caller uses the publisher
+     *  URL) for non-ONVIF cams, missing IP, or cams whose RTSP isn't directly
+     *  reachable from the phone (e.g. cameras only reachable via the NVR relay). */
+    private suspend fun onvifDirectStreamUrl(channelId: Int, stream: Int): String? {
+        val entry = findIpCamEntry(channelId) ?: return null
+        if (!entry.optString("Protocolname").equals("ONVIF", ignoreCase = true)) return null
+        val ip = entry.optString("IPAddr").ifBlank { return null }
+        if (!tcpReachable(ip, 554, 1500)) return null
+        val url = OnvifResolver.resolveStreamUri(
+            ip = ip,
+            onvifPort = entry.optInt("Port", 80),
+            user = entry.optString("Username", "admin"),
+            pass = entry.optString("Password", ""),
+            wantSub = stream != 0,
+        )
+        if (url != null) android.util.Log.i("NvrViewModel", "ONVIF-resolved ch$channelId -> $url")
+        return url
+    }
+
+    private suspend fun tcpReachable(host: String, port: Int, timeoutMs: Int): Boolean =
+        withContext(Dispatchers.IO) {
+            try { java.net.Socket().use { it.connect(java.net.InetSocketAddress(host, port), timeoutMs) }; true }
+            catch (_: Throwable) { false }
+        }
 
     /** Open (or reuse) the per-channel RTSP libjuice tunnel. Returns its
      *  localhost port. Only valid in Remote mode. Mirrors the HTTP-tunnel
@@ -668,47 +798,60 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
+    /** Popup message shown after a camera add/edit when the camera couldn't be
+     *  found at the entered IP (the slot is reverted to empty). Null = no popup. */
+    var cameraAddMessage by mutableStateOf<String?>(null)
+
     fun saveIpCamEntry(channelId: Int, edits: Map<String, Any?>, onDone: () -> Unit = {}) {
         val a = api ?: return
         val arr = ipCamInfo ?: return
         val obj = (0 until arr.length())
             .map { arr.getJSONObject(it) }
             .firstOrNull { it.optInt("ID") == channelId } ?: return
-        edits.forEach { (k, v) -> if (v == null) obj.remove(k) else obj.put(k, v) }
+        // Capture the IP this slot had BEFORE the edit, so we can tell whether
+        // the user is pointing the channel at a NEW camera (→ verify it connects)
+        // vs. just tweaking an existing one (→ never wipe it if it's offline).
+        val prevIp = obj.optString("IPAddr")
+        val expectedIp = (edits["IPAddr"] as? String)?.trim().orEmpty()
+        val pointingAtNewIp = expectedIp.isNotBlank() && expectedIp != prevIp
+        val portGuess = (edits["Port"] as? Int)
+            ?: (edits["Port"] as? String)?.toIntOrNull() ?: 554
+        val isLan = credentials?.remote == false
         ipCamInfoStatus = null
+        // Dismiss the dialog immediately — the caller closes it the instant Save
+        // is tapped; the work below runs in the background.
+        onDone()
         viewModelScope.launch {
             try {
+                // Fast pre-check (LAN only): something must answer at the new IP
+                // before we write it to the NVR. This stops a dead/typo'd IP from
+                // ever being bound — the channel stays exactly as it was and never
+                // inherits another channel's stream. Over P2P we can't reach a
+                // camera IP directly, so we skip the probe and just save.
+                if (pointingAtNewIp && isLan) {
+                    ipCamInfoStatus = "Checking $expectedIp…"
+                    val reachable = tcpReachable(expectedIp, portGuess, 2000) ||
+                        tcpReachable(expectedIp, 554, 1500) ||
+                        tcpReachable(expectedIp, 80, 1500)
+                    if (!reachable) {
+                        ipCamInfoStatus = null
+                        cameraAddMessage =
+                            "No camera found at $expectedIp.\n\nNothing responded at that address, so " +
+                            "channel ${channelId + 1} was left with no camera connected. Check the IP, " +
+                            "that the camera is powered on and on this network, then try again."
+                        return@launch   // obj NOT mutated; NVR left unchanged
+                    }
+                }
+                edits.forEach { (k, v) -> if (v == null) obj.remove(k) else obj.put(k, v) }
                 a.setIpCamInfoOne(channelId, obj)
-                ipCamInfoStatus = "Saved channel ${channelId + 1} — waiting for stream URL…"
+                ipCamInfoStatus = "Saved channel ${channelId + 1} — connecting…"
                 loadIpCamInfo()
                 refreshChannels()
-                // Trigger publisher's discovery immediately + then poll
-                // /api/channels until ch shows up with a non-empty URL.
-                // Bounded at ~10s so a misconfigured camera doesn't hang
-                // the UI; if the channel still isn't resolved by then we
-                // surface a status and onDone() so the user can navigate
-                // (the channel will fill in eventually via the background
-                // refresh tick).
-                val pub = publisher()
-                if (pub != null) {
-                    pub.refresh()
-                    val expectedIp = (edits["IPAddr"] as? String).orEmpty()
-                    var ready = false
-                    for (attempt in 1..10) {
-                        kotlinx.coroutines.delay(1000)
-                        val list = runCatching { pub.channels("sub") }.getOrNull() ?: continue
-                        val match = list.firstOrNull { it.channel == channelId }
-                        if (match != null && match.url.isNotBlank() &&
-                            (expectedIp.isBlank() || match.ip == expectedIp)) {
-                            ready = true
-                            break
-                        }
-                    }
-                    ipCamInfoStatus =
-                        if (ready) "Saved channel ${channelId + 1} — ready to stream"
-                        else "Saved channel ${channelId + 1}. URL still resolving; try Live in a few seconds."
-                }
-                onDone()
+                loadConnectedChannels()
+                // Give the camera a moment to come up, then refresh the badge.
+                kotlinx.coroutines.delay(4000)
+                loadConnectedChannels()
+                ipCamInfoStatus = "Saved channel ${channelId + 1}."
             } catch (t: Throwable) {
                 ipCamInfoStatus = "Save failed: ${t.message}"
             }
@@ -741,6 +884,27 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
 
     var searchResults by mutableStateOf<JSONArray?>(null)
     var searchBusy by mutableStateOf(false)
+
+    /** Session-sticky discovery store. Discovery is flaky — an online camera can
+     *  miss a scan round (ONVIF's 4 s deadline, a slow RTSP probe), and the old
+     *  code overwrote `searchResults` every scan, so a camera that answered once
+     *  then missed the next round would vanish even though it's still online.
+     *  Instead we keep every device found this session, refresh the ones seen
+     *  again, and only drop a device after it's missed [discoveryExpireRounds]
+     *  consecutive scans. Keyed by MAC (or IP when no MAC); insertion-ordered so
+     *  the visible list stays stable across rescans. Cleared via
+     *  [clearSearchResults] or when the NVR is released. */
+    private val discovered = LinkedHashMap<String, JSONObject>()
+    private val discoveryMisses = HashMap<String, Int>()
+    private val discoveryExpireRounds = 3
+
+    /** Wipe the sticky discovery list (the "Clear" button on the scan results). */
+    fun clearSearchResults() {
+        discovered.clear()
+        discoveryMisses.clear()
+        searchResults = null
+        ipCamInfoStatus = null
+    }
 
     fun searchIpc() {
         android.util.Log.i("NvrViewModel", "searchIpc() called  api=${api != null}")
@@ -779,25 +943,46 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 // Merge by MAC if present, else by IP. Priority: N1 (richest
                 // metadata) > ONVIF (vendor + model from Scopes) > sweep
                 // (only IP + banner-derived vendor).
-                val merged = JSONArray()
-                val seenKeys = HashSet<String>()
+                // This round's finds, deduped by MAC (else IP). Priority order
+                // (N1 first) means richer metadata wins on key collisions.
+                val round = LinkedHashMap<String, JSONObject>()
                 fun addOnce(o: JSONObject) {
-                    val key = o.optString("Mac").ifBlank { o.optString("IPAddr") }
-                    if (key.isNotBlank() && seenKeys.add(key.lowercase())) merged.put(o)
+                    val key = o.optString("Mac").ifBlank { o.optString("IPAddr") }.lowercase()
+                    if (key.isNotBlank() && !round.containsKey(key)) round[key] = o
                 }
                 for (i in 0 until n1.length()) addOnce(n1.getJSONObject(i))
                 onvif.forEach(::addOnce)
                 sweep.forEach(::addOnce)
 
+                // Merge into the sticky store: refresh anything seen this round,
+                // age out anything missed (drop only after N misses), append the
+                // genuinely-new — so a one-round miss no longer makes a live
+                // camera disappear from the list.
+                val keys = LinkedHashSet<String>().apply {
+                    addAll(discovered.keys); addAll(round.keys)
+                }
+                for (k in keys) {
+                    val fresh = round[k]
+                    if (fresh != null) {
+                        discovered[k] = fresh          // refresh metadata
+                        discoveryMisses.remove(k)
+                    } else {
+                        val misses = (discoveryMisses[k] ?: 0) + 1
+                        if (misses >= discoveryExpireRounds) {
+                            discovered.remove(k); discoveryMisses.remove(k)
+                        } else {
+                            discoveryMisses[k] = misses
+                        }
+                    }
+                }
+                val merged = JSONArray().apply { discovered.values.forEach { put(it) } }
                 searchResults = merged
                 val n = merged.length()
-                val n1n = n1.length()
-                val onvN = onvif.size
-                val swN = n - n1n - onvN
+                val roundN = round.size
                 ipCamInfoStatus = if (n == 0) "No cameras found"
-                    else "Found $n camera${if (n == 1) "" else "s"} ($n1n N1, $onvN ONVIF, $swN by IP-sweep)"
+                    else "Showing $n camera${if (n == 1) "" else "s"} ($roundN this scan)"
                 android.util.Log.i("NvrViewModel",
-                    "searchIpc(): N1=$n1n ONVIF=${onvif.size} sweep=${sweep.size} merged=$n")
+                    "searchIpc(): round N1=${n1.length()} ONVIF=${onvif.size} sweep=${sweep.size} → sticky=$n (round=$roundN)")
             } catch (t: Throwable) {
                 ipCamInfoStatus = "Search failed: ${t.message}"
                 android.util.Log.e("NvrViewModel", "searchIpc() failed: ${t.message}", t)
@@ -837,13 +1022,14 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                "SupportFaceDetect", "SupportPir", "MediaProtocolVer", "InterfaceType")
             .forEach { k -> if (found.has(k)) target.put(k, found.get(k)) }
         ipCamInfoStatus = null
+        onDone()   // close the picker immediately; the rest resolves in background
         viewModelScope.launch {
             try {
                 a.setIpCamInfoOne(channelId, target)
-                ipCamInfoStatus = "Assigned to channel ${channelId + 1}"
+                ipCamInfoStatus = "Assigned to channel ${channelId + 1} — connecting…"
                 loadIpCamInfo()
                 refreshChannels()
-                onDone()
+                loadConnectedChannels()
             } catch (t: Throwable) {
                 ipCamInfoStatus = "Assign failed: ${t.message}"
             }
@@ -858,6 +1044,206 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------------
+    // Recording playback.
+    //
+    //  - Search: PUT /netsdk/R.SearchRecord with the firmware envelope
+    //    {DEV,VER,API,Parameter}. Channel + Type are arrays of capitalised
+    //    booleans ("True"/"False"); BeginTime/EndTime are "HH:MM:SS"; Date is
+    //    "YYYY-MM-DD" (verified against the NVR web UI bundle). Response items
+    //    carry TimeStart/TimeEnd as epoch SECONDS in the NVR's local wall clock
+    //    expressed as if UTC — format with ZoneOffset.UTC, never the device's
+    //    zone (see arcis-nvr-record-timestamps).
+    //  - Stream: ReplayPlayer over the :10000 replay protocol. LAN dials the
+    //    NVR directly; Remote opens a `<deviceId>-replay` libjuice tunnel
+    //    (mirrors the publisher tunnel). The device provider must register a
+    //    matching service forwarding to 127.0.0.1:10000.
+    // ------------------------------------------------------------------
+    data class RecordSegment(val channel: Int, val startSec: Long, val endSec: Long, val type: String)
+
+    var recordSegments by mutableStateOf<List<RecordSegment>?>(null)
+    var recordSearchBusy by mutableStateOf(false)
+    var recordSearchStatus by mutableStateOf<String?>(null)
+
+    /** Per-channel LIVE connection status from `/netsdk/Stat` IPC[].Status —
+     *  the authoritative "is this camera actually online" signal (IPCamInfo's
+     *  own Status field comes back empty on this firmware). Common values:
+     *  "Connect success" (online), "Connect Failed" (offline), "Updating"
+     *  (connecting). Drives the online/offline badges on Live, Playback and
+     *  Cameras. `connectedChannels` is the online subset. Null/empty = not
+     *  loaded yet (callers fall back to the configured Enable flag). */
+    var connectedChannels by mutableStateOf<Set<Int>?>(null)
+        private set
+    var channelStatus by mutableStateOf<Map<Int, String>>(emptyMap())
+        private set
+
+    /** Last captured frame for each channel — shown as tile thumbnail on the
+     *  Device tab grid. Written from LiveScreen while VLC is playing. */
+    val channelThumbnails = mutableStateMapOf<Int, Bitmap>()
+
+    fun setChannelThumbnail(channelId: Int, bmp: Bitmap) {
+        channelThumbnails[channelId] = bmp
+    }
+
+    /** Channel currently highlighted in the LiveScreen grid — PlaybackTabScreen
+     *  reads this to pre-select the same channel on open. */
+    var selectedLiveChannel: Int = 0
+
+    /** User-visible NVR display name — editable in the Device tab header and
+     *  shared with LiveScreen so both show the same title. Defaults to "Device";
+     *  updated by [setDisplayNvrName]. */
+    private var _displayNvrName by mutableStateOf("Device")
+    val displayNvrName: String get() = _displayNvrName
+
+    fun setDisplayNvrName(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isNotBlank()) _displayNvrName = trimmed
+    }
+
+    private val channelNamesMap = mutableMapOf<Int, String>()
+    fun channelDisplayName(id: Int): String = channelNamesMap[id] ?: "Device:${id + 1}"
+    fun setChannelDisplayName(id: Int, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isNotBlank()) channelNamesMap[id] = trimmed
+    }
+
+    /** Offline = we have a status reading for [channelId] and it is online by
+     *  NEITHER signal (NVR recorder nor publisher streamability). Returns false
+     *  when we haven't read any status yet, so a freshly-loaded screen never
+     *  false-flags a camera as offline. */
+    fun isChannelOffline(channelId: Int): Boolean {
+        val cc = connectedChannels ?: return false
+        if (channelId in cc) return false
+        return channelStatus.containsKey(channelId)
+    }
+
+    @Volatile private var statusRefreshing = false
+
+    fun loadConnectedChannels() {
+        val a = api ?: return
+        if (statusRefreshing) return
+        statusRefreshing = true
+        viewModelScope.launch {
+            try {
+                val statusMap = mutableMapOf<Int, String>()
+                val onlineSet = mutableSetOf<Int>()
+                // 1) NVR recorder view (/netsdk/Stat). Accurate for N1 cameras;
+                //    reports ONVIF cams (e.g. CP Plus) as "Connect Failed" even
+                //    when they stream fine, because the NVR's recorder can't
+                //    ingest them (K2). So this alone under-reports online.
+                runCatching {
+                    val ipc = a.stat().optJSONArray("IPC")
+                    if (ipc != null) for (i in 0 until ipc.length()) {
+                        val o = ipc.optJSONObject(i) ?: continue
+                        val id = o.optInt("ID", i)
+                        val status = o.optString("Status")
+                        statusMap[id] = status
+                        if (status.equals("Connect success", ignoreCase = true)) onlineSet.add(id)
+                    }
+                    channelStatus = statusMap
+                    connectedChannels = onlineSet.toSet()
+                }.onFailure { android.util.Log.w("NvrViewModel", "stat failed: ${it.message}") }
+                // 2) Publisher view (:8080 /api/channels) — the camera is really
+                //    streamable when the publisher resolved a URL + codec with no
+                //    error. That's exactly what the app plays, so it's the true
+                //    "online" for ONVIF cams the NVR recorder rejects.
+                runCatching {
+                    publisher()?.channels("sub")?.forEach { ch ->
+                        if (ch.enabled && ch.url.isNotBlank() && ch.error.isBlank() && ch.codec.isNotBlank())
+                            onlineSet.add(ch.channel)
+                    }
+                    connectedChannels = onlineSet.toSet()
+                }.onFailure { android.util.Log.w("NvrViewModel", "pub status failed: ${it.message}") }
+                android.util.Log.i("NvrViewModel", "online=$connectedChannels status=$channelStatus")
+            } finally {
+                statusRefreshing = false
+            }
+        }
+    }
+
+    /** Search one channel's recordings for the UTC day containing [dayUtcMillis]. */
+    fun searchRecordings(channelId: Int, dayUtcMillis: Long) {
+        val a = api ?: run { recordSearchStatus = "Not connected"; return }
+        recordSearchBusy = true
+        recordSearchStatus = null
+        recordSegments = null
+        viewModelScope.launch {
+            try {
+                val date = java.time.Instant.ofEpochMilli(dayUtcMillis)
+                    .atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()
+                val channelMask = JSONArray()
+                for (i in 0 until maxChannels) channelMask.put(if (i == channelId) "True" else "False")
+                // EXACT format verified live vs firmware 3.6.6.20TestF (2026-06-06):
+                // Type = 4 booleans (Timing/Motion/Alarm/Manual); CurrentPage MUST be a
+                // STRING; Reload:"True" is required. Any deviation (5 types, int page,
+                // missing Reload) → {"RetCode":"-1","RetDetail":"Search Failed!"}.
+                // Response: {"Item":[{Channel,Type,TimeStart,TimeEnd(epoch sec),TotalSize,Disk,ID}]}.
+                val typeMask = JSONArray().apply { repeat(4) { put("True") } }
+                val param = JSONObject()
+                    .put("Channel", channelMask)
+                    .put("Type", typeMask)
+                    .put("Date", date)
+                    .put("BeginTime", "00:00:00")
+                    .put("EndTime", "23:59:59")
+                    .put("PageSize", 200)
+                    .put("CurrentPage", "1")
+                    .put("Reload", "True")
+                val resp = JSONObject(a.searchRecord(netsdkEnvelope("R.SearchRecord", param)))
+                val arr = findRecordArray(resp)
+                val out = ArrayList<RecordSegment>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val s = o.optLong("TimeStart", o.optLong("BeginTime", 0))
+                    val e = o.optLong("TimeEnd", o.optLong("EndTime", 0))
+                    if (s > 0 && e > s) out.add(
+                        RecordSegment(o.optInt("Channel", channelId), s, e, o.optString("Type")))
+                }
+                recordSegments = out
+                recordSearchStatus = if (out.isEmpty()) "No recordings for that day" else null
+                android.util.Log.i("NvrViewModel", "searchRecordings ch$channelId $date -> ${out.size} segments")
+            } catch (t: Throwable) {
+                recordSearchStatus = "Search failed: ${t.message}"
+                android.util.Log.w("NvrViewModel", "searchRecordings failed: ${t.message}")
+            } finally {
+                recordSearchBusy = false
+            }
+        }
+    }
+
+    private fun findRecordArray(root: JSONObject): JSONArray? {
+        listOf("fileList", "Item", "List", "RecordList", "Record", "Result", "Data").forEach { k ->
+            root.optJSONArray(k)?.let { return it }
+        }
+        root.optJSONObject("Parameter")?.optJSONArray("Item")?.let { return it }
+        root.keys().forEach { k -> root.optJSONArray(k)?.let { return it } }
+        return null
+    }
+
+    @Volatile private var replayTunnel: RemoteSession? = null
+
+    /** Resolve the host:port for the :10000 replay stream. LAN → (host, 10000);
+     *  Remote → opens (or reuses) the `<deviceId>-replay` libjuice tunnel and
+     *  returns ("127.0.0.1", localPort). Null if the tunnel can't be opened. */
+    suspend fun replayEndpoint(): Pair<String, Int>? {
+        val creds = credentials ?: return null
+        if (!creds.remote) return creds.host to 10000
+        val cur = replayTunnel
+        if (cur != null && cur.isAlive) return "127.0.0.1" to cur.localPort
+        cur?.let { runCatching { it.close() } }
+        replayTunnel = null
+        val sid = "${creds.deviceId}-replay"
+        android.util.Log.i("NvrViewModel", "opening replay tunnel $sid")
+        val ns = RemoteSession(sid, remoteConfig)
+        if (!ns.connect()) {
+            ns.close()
+            android.util.Log.w("NvrViewModel", "replay tunnel connect failed for $sid")
+            return null
+        }
+        replayTunnel = ns
+        android.util.Log.i("NvrViewModel", "replay tunnel ready: $sid -> 127.0.0.1:${ns.localPort}")
+        return "127.0.0.1" to ns.localPort
+    }
+
+    // ------------------------------------------------------------------
     // PTZ control — talks to camera HTTP directly.
     //
     //  - LAN mode:    PtzClient → camera-IP:80 (direct)
@@ -869,6 +1255,13 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     // PTZ press, cached for the session lifetime.
     // ------------------------------------------------------------------
     var ptzStatus by mutableStateOf<String?>(null)
+    /** When non-null, the Live screen shows a popup dialog (e.g. "This camera
+     *  has no PTZ."). The publisher is the source of truth for PTZ capability. */
+    var ptzPopupMessage by mutableStateOf<String?>(null)
+    /** Channels the publisher has reported as having no PTZ — so the PTZ button
+     *  shows the popup immediately instead of opening a dead control pad. */
+    var ptzUnsupportedChannels by mutableStateOf<Set<Int>>(emptySet())
+        private set
 
     /** UI-side PTZ capability descriptor for a channel. Doesn't do any
      *  network work — pure protocol-name heuristic to grey out the pad
@@ -908,7 +1301,20 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             if (!r.ok) {
                 // Publisher returns "camera does not support PTZ (fixed-position model)"
                 // for bullet/fixed-dome and "PTZ not implemented for N1 cams" for N1.
-                ptzStatus = extractError(r.error) ?: "PTZ rejected"
+                val err = extractError(r.error) ?: "PTZ rejected"
+                // A fixed camera rejects PTZ in several ways: an explicit "does not
+                // support PTZ" / "not implemented" message, OR (ONVIF cams like CP
+                // Plus) a SOAP fault such as "InvalidArgVal". Treat all of these as
+                // "no PTZ" and show the clean popup instead of the raw fault text.
+                val noPtz = listOf("support", "not implemented", "fixed", "no ptz",
+                                   "fault", "invalidarg", "invalid arg", "not exist", "rejected")
+                    .any { err.contains(it, ignoreCase = true) }
+                if (noPtz) {
+                    ptzUnsupportedChannels = ptzUnsupportedChannels + channelId
+                    ptzPopupMessage = "This camera has no PTZ."
+                } else {
+                    ptzStatus = err
+                }
             }
         }
     }
@@ -951,9 +1357,14 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     var smtpCfg by mutableStateOf<JSONObject?>(null)
     var wifiCfg by mutableStateOf<JSONObject?>(null)
     var encodeCfg by mutableStateOf<JSONArray?>(null)
+    var osdCfg by mutableStateOf<JSONObject?>(null)
     var localTimeRaw by mutableStateOf<String?>(null)
     var generalTimeCfg by mutableStateOf<JSONObject?>(null)
     var generalMaintCfg by mutableStateOf<JSONObject?>(null)
+    var pppoeCfg by mutableStateOf<JSONObject?>(null)
+    var diskStat by mutableStateOf<JSONObject?>(null)
+    var usersCfg by mutableStateOf<JSONObject?>(null)
+    var logsCfg by mutableStateOf<JSONObject?>(null)
     var settingStatus by mutableStateOf<String?>(null)
 
     fun loadOrdinary() = launchBlock({ api?.deviceInfo() }) {
@@ -966,6 +1377,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     fun loadSmtp() = launchBlock({ api?.smtp() }) { smtpCfg = it }
     fun loadWifi() = launchBlock({ api?.wifi() }) { wifiCfg = it }
     fun loadEncode() = launchBlock({ api?.streamEncode() }) { encodeCfg = it }
+    // OSD edits the full /netsdk/Stream object (Title/OSD/Ircut/Encode/Color/Ptz)
+    // and round-trips it on save so untouched fields are preserved.
+    fun loadOsd() = launchBlock({ api?.streamConfig()?.let { JSONObject(it) } }) { osdCfg = it }
 
     fun saveGeneral(updated: JSONObject) =
         launchSave({ api?.setGeneral(updated) }, "General saved") { loadGeneral() }
@@ -977,6 +1391,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         launchSave({ api?.setWifi(updated) }, "Wi-Fi saved") { loadWifi() }
     fun saveEncode(updated: JSONArray) =
         launchSave({ api?.setStreamEncode(updated) }, "Encoding saved") { loadEncode() }
+    fun saveOsd(updated: JSONObject) =
+        launchSave({ api?.setStream(updated) }, "OSD saved") { loadOsd() }
     fun rebootNvr() =
         launchSave({ api?.reboot() }, "Reboot sent") {}
     fun testSmtp() =
@@ -991,6 +1407,53 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     fun loadGeneralMaint() = launchBlock({ api?.generalMaintenance() }) { generalMaintCfg = it }
     fun saveGeneralMaint(updated: JSONObject) =
         launchSave({ api?.setGeneralMaintenance(updated) }, "Maintenance schedule saved") { loadGeneralMaint() }
+
+    // ---- PPPoE (DSL dial-up) ----------------------------------------------
+    // Same /netsdk/Network/* family as Wi-Fi/SMTP — bare-object round-trip,
+    // no {DEV,VER,API,Parameter} envelope (that envelope is only for the
+    // "API action" endpoints like LogSearch / AddUser / R.SearchRecord).
+    fun loadPppoe() = launchBlock({ api?.pppoe() }) { pppoeCfg = it }
+    fun savePppoe(updated: JSONObject) =
+        launchSave({ api?.setPppoe(updated) }, "PPPoE saved") { loadPppoe() }
+
+    // ---- Storage / Disk (read-only) ---------------------------------------
+    fun loadDiskStat() = launchBlock({ api?.stat() }) { diskStat = it }
+
+    // ---- Users (read-only list) -------------------------------------------
+    // GET /netsdk/User needs no body. Add/edit/delete are deferred: they
+    // mutate live NVR auth (risk of locking out admin mid-demo) and the
+    // AddUser Parameter schema isn't verified against this firmware yet.
+    fun loadUsers() = launchBlock({ api?.users()?.let { JSONObject(it) } }) { usersCfg = it }
+
+    // ---- Logs (read-only search) ------------------------------------------
+    // LogSearch is non-destructive. Body must be the firmware envelope
+    // {DEV,VER,API:"LogSearch",Parameter:{...}} (verified against the NVR web
+    // UI bundle). Type 0 = all log types; broad page so the demo shows data.
+    fun loadLogs() {
+        val a = api ?: run { settingStatus = "Not connected"; return }
+        settingStatus = "Loading logs…"
+        viewModelScope.launch {
+            try {
+                val param = JSONObject()
+                    .put("Type", 0)
+                    .put("PageSize", 50)
+                    .put("CurrentPage", 1)
+                logsCfg = JSONObject(a.logSearch(netsdkEnvelope("LogSearch", param)))
+                settingStatus = null
+            } catch (t: Throwable) {
+                settingStatus = "Log search failed: ${t.message}"
+            }
+        }
+    }
+
+    /** Wrap a Parameter object in the firmware's action envelope. Used by the
+     *  "API action" endpoints (LogSearch, R.SearchRecord, AddUser, …) which —
+     *  unlike the bare Network-config PUTs — expect this outer shape. */
+    private fun netsdkEnvelope(apiName: String, parameter: JSONObject): String =
+        JSONObject()
+            .put("DEV", "XVR").put("VER", "1.0")
+            .put("API", apiName).put("Parameter", parameter)
+            .toString()
 
     // ---- Change password ---------------------------------------------------
     /** Posts to /netsdk/SetPasswd. NVR firmware expects User/OldPasswd/NewPasswd. */

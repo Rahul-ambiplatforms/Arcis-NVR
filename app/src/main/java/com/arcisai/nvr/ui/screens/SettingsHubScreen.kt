@@ -56,10 +56,12 @@ fun SettingsHubScreen(
     val clipboard = LocalClipboardManager.current
 
     val capacityPct: String? = remember(vm.diskStat) {
-        vm.diskStat?.let { s ->
-            val used  = s.optDouble("UsedSize", -1.0)
-            val total = s.optDouble("TotalSize", -1.0)
-            if (used >= 0 && total > 0) "%.1f%%".format(used / total * 100.0) else null
+        vm.diskStat?.optJSONObject("HDDState")?.let { hdd ->
+            val pct = hdd.optString("UsedPercentage", "").removeSuffix("%").toDoubleOrNull()
+            if (pct != null && pct >= 0) return@remember "%.1f%%".format(pct)
+            val total = hdd.optString("Total", "0").substringBefore(' ').toDoubleOrNull() ?: -1.0
+            val used  = hdd.optString("Used",  "0").substringBefore(' ').toDoubleOrNull() ?: -1.0
+            if (total > 0 && used >= 0) "%.1f%%".format(used / total * 100.0) else null
         }
     }
 
@@ -132,47 +134,33 @@ fun SettingsHubScreen(
             item { HubSectionHeader("Base Station Settings") }
             item {
                 SettingsGroup {
-                    NavRow("Storage Settings",  null, Icons.Default.Storage)   { onPick("disk") }
+                    NavRow("Storage Settings", null, Icons.Default.Storage)  { onPick("disk") }
                     GroupDivider()
-                    NavRow("Time Settings",     null, Icons.Default.Schedule)  { onPick("time") }
+                    NavRow("Time Settings",    null, Icons.Default.Schedule) { onPick("time") }
                     GroupDivider()
                     NavRow("Password Settings",
-                        "Set a device password to prevent unauthorized pairing.",
+                        "Change your device login password",
                         Icons.Default.Lock) { onPick("password") }
                 }
             }
 
-            // ── Network Settings ───────────────────────────────────────────
-            item { HubSectionHeader("Network Settings") }
+            // ── Notifications ──────────────────────────────────────────────
+            item { HubSectionHeader("Notifications") }
             item {
                 SettingsGroup {
-                    NavRow("LAN",   "DHCP, IP, gateway, DNS, ports", Icons.Default.Lan)   { onPick("network") }
-                    GroupDivider()
-                    NavRow("Wi-Fi", "SSID, mode, AP / station",      Icons.Default.Wifi)  { onPick("wifi") }
-                    GroupDivider()
-                    NavRow("Email", "SMTP for alarm notifications",   Icons.Default.Email) { onPick("smtp") }
+                    NavRow("Email Alerts",
+                        "Receive motion and alarm events by email",
+                        Icons.Default.Email) { onPick("smtp") }
                 }
             }
 
-            // ── System ─────────────────────────────────────────────────────
-            item { HubSectionHeader("System") }
+            // ── Device ─────────────────────────────────────────────────────
+            item { HubSectionHeader("Device") }
             item {
                 SettingsGroup {
-                    NavRow("General",     "Name, language, video standard", Icons.Default.Settings)   { onPick("general") }
-                    GroupDivider()
-                    NavRow("Logs",        "System / alarm / operation log", Icons.Default.Article)    { onPick("log") }
-                    GroupDivider()
-                    NavRow("Maintenance", "Auto-reboot schedule",           Icons.Default.BuildCircle) { onPick("maint") }
-                }
-            }
-
-            // ── Users & Security ───────────────────────────────────────────
-            item { HubSectionHeader("Users & Security") }
-            item {
-                SettingsGroup {
-                    NavRow("Users",           "Add, delete, set permissions", Icons.Default.Group)  { onPick("users") }
-                    GroupDivider()
-                    NavRow("Change Password", "Admin password",               Icons.Default.VpnKey) { onPick("password") }
+                    NavRow("Device Name",
+                        "Rename this NVR",
+                        Icons.Default.Edit) { onPick("general") }
                 }
             }
 

@@ -1,7 +1,12 @@
 package com.arcisai.nvr.viewmodel
 
 import android.app.Application
+import android.content.ContentValues
 import android.graphics.Bitmap
+import android.media.MediaCodec
+import android.media.MediaFormat
+import android.media.MediaMuxer
+import android.provider.MediaStore
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -25,15 +30,22 @@ import com.arcisai.nvr.net.PublisherApi
 import com.arcisai.nvr.net.PtzClient
 import com.arcisai.nvr.net.RtspTlsProxy
 import com.arcisai.nvr.net.SubnetSweep
+import com.arcisai.nvr.net.WsReplayClient
 import com.arcisai.nvr.p2p.RemoteConfig
 import com.arcisai.nvr.p2p.RemoteSession
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 data class ChannelInfo(
     val id: Int,
@@ -44,6 +56,8 @@ data class ChannelInfo(
     val protocol: String,   // N1 / HIKVISION / DAHUA / ONVIF / RTSP
     val enabled: Boolean,
 )
+
+data class LoginEvent(val epochMs: Long, val email: String)
 
 class NvrViewModel(app: Application) : AndroidViewModel(app) {
     private val store = CredentialStore(app)
@@ -68,6 +82,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     var accountName  by mutableStateOf<String?>(null)
         private set
     var accountEmail by mutableStateOf<String?>(null)
+        private set
+    /** Login events recorded in this app session (newest-first after reversal). */
+    var loginActivity by mutableStateOf<List<LoginEvent>>(emptyList())
         private set
     /** The list of ABDs (NVRs) the user owns, last-fetched. */
     var myAbds by mutableStateOf<List<AbdDto>>(emptyList())
@@ -100,6 +117,43 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     private val sessions = ConcurrentHashMap<String, RemoteSession>()
     private val remoteConfig = RemoteConfig()
     var remoteStatus by mutableStateOf<String?>(null)
+
+    // Pre-warm: full P2P sessions started in the background as soon as the NVR
+    // list is shown, so by the time the user taps a device ICE is often done.
+    private val prewarmSessions = ConcurrentHashMap<String, RemoteSession>()
+    private val prewarmJobs    = ConcurrentHashMap<String, Job>()
+
+    /** Called from MyNvrsScreen when the device list loads.
+     *  Quietly connects to up to 4 NVRs so [login] can skip ICE entirely. */
+    fun prewarmP2p(deviceIds: List<String>) {
+        deviceIds.take(4).forEach { deviceId ->
+            if (prewarmSessions.containsKey(deviceId) || prewarmJobs.containsKey(deviceId)) return@forEach
+            val job = viewModelScope.launch(Dispatchers.IO) {
+                val s = RemoteSession(deviceId, remoteConfig)
+                val ok = s.connect()
+                if (ok) {
+                    if (prewarmSessions.putIfAbsent(deviceId, s) != null) {
+                        s.close()
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            sessionOnlineIds = sessionOnlineIds + deviceId
+                        }
+                    }
+                } else {
+                    s.close()
+                }
+                prewarmJobs.remove(deviceId)
+            }
+            prewarmJobs[deviceId] = job
+        }
+    }
+
+    private fun cancelPrewarm() {
+        prewarmJobs.values.forEach { it.cancel() }
+        prewarmJobs.clear()
+        prewarmSessions.values.forEach { runCatching { it.close() } }
+        prewarmSessions.clear()
+    }
 
     /** True if the main HTTP-API P2P session has heard a PONG recently. UI uses
      *  this to surface "NVR offline" banners + suppress error toasts during
@@ -144,6 +198,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             // would otherwise serve one stalled request first.
             publisherTunnel?.let { runCatching { it.close() } }; publisherTunnel = null
             replayTunnel?.let { runCatching { it.close() } }; replayTunnel = null
+            streamUrlCache.clear()  // ports change when tunnels rebuild
 
             // Bail if the user logged out / switched NVR before we got here —
             // otherwise we'd resurrect a P2P session the user just tore down
@@ -218,17 +273,25 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     api = NetSdkApi(saved)
                     startDestination = "main"
                 } else {
-                    // Cloud: verify the persisted cookie is still valid.
-                    startDestination = try {
-                        val resp = cloudApi.getAbd()
-                        if (resp.success) {
-                            accountSignedIn = true
-                            myAbds = resp.data
-                            accountEmail = saved.accountEmail.ifBlank { null }
-                            accountName  = saved.accountName.ifBlank { null }
-                            "my_nvrs"
-                        } else "login"
-                    } catch (_: Throwable) { "login" }
+                    // Cloud: check the persisted cookie — no network round-trip needed.
+                    // Accessing cloudApi initialises PersistentCookieStore from SharedPreferences.
+                    @Suppress("UNUSED_EXPRESSION") cloudApi
+                    val cookieJar = BackendApi.cookieJarInstance
+                    if (cookieJar != null && cookieJar.hasSessionFor(BackendApi.HOST)) {
+                        accountSignedIn = true
+                        accountEmail = saved.accountEmail.ifBlank { null }
+                        accountName  = saved.accountName.ifBlank { null }
+                        if (saved.deviceId.isNotBlank()) {
+                            credentials = saved
+                            viewModelScope.launch { attemptReconnectMain(saved) }
+                            startDestination = "main"
+                        } else {
+                            startDestination = "my_nvrs"
+                        }
+                        loadAbds()  // populate NVR list in background
+                    } else {
+                        startDestination = "login"
+                    }
                 }
             } catch (_: Throwable) {
                 startDestination = "login"
@@ -243,11 +306,31 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (creds.remote) {
-                    // Retry with back-off: right after a logout the device provider
-                    // can still hold the previous consumer for ~30–60 s and either
-                    // refuse the new ICE or let it connect but stall the first HTTP
-                    // probe. Closing + waiting + retrying rides over that window
-                    // (fixes the "re-login → stream won't start" case, K1).
+                    // Fast path: use a pre-warmed session if one is ready.
+                    val prewarmed = prewarmSessions.remove(creds.deviceId)
+                    if (prewarmed?.isAlive == true) {
+                        try {
+                            remoteStatus = "Connecting…"
+                            val a = NetSdkApi(creds.copy(host = "127.0.0.1", port = prewarmed.localPort))
+                            a.network()  // sanity probe through the pre-warmed tunnel
+                            sessions[creds.deviceId] = prewarmed
+                            store.save(creds)
+                            credentials = creds
+                            api = a
+                            sessionOnlineIds = sessionOnlineIds + creds.deviceId
+                            remoteStatus = "Connected via P2P"
+                            loadOrdinary()
+                            onSuccess()
+                            return@launch
+                        } catch (t: Throwable) {
+                            android.util.Log.w("NvrViewModel", "prewarm probe failed: ${t.message}")
+                            prewarmed.close()
+                        }
+                    } else {
+                        prewarmed?.close()
+                    }
+
+                    // Slow path: connect fresh. Fast fixed retry (no exponential back-off).
                     var connected = false
                     var lastErr: String? = null
                     for (attempt in 1..3) {
@@ -275,7 +358,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                                 session.close()  // free the consumer so the retry is clean
                             }
                         }
-                        if (attempt < 3) kotlinx.coroutines.delay(2500L * attempt)
+                        if (attempt < 3) kotlinx.coroutines.delay(500L)  // fast retry (was 2500×attempt)
                     }
                     if (!connected) {
                         remoteStatus = null
@@ -311,6 +394,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         accountEmail = null
         myAbds = emptyList()
         abdListError = null
+        sessionOnlineIds = emptySet()
         startDestination = "login"
     }
 
@@ -326,6 +410,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     private fun releaseSelectedNvrLocal() {
         sessions.values.forEach { runCatching { it.close() } }
         sessions.clear()
+        cancelPrewarm()
         tlsProxies.values.forEach { runCatching { it.close() } }
         tlsProxies.clear()
         publisherTunnel?.let { runCatching { it.close() } }
@@ -333,6 +418,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         publisherApiInstance = null
         replayTunnel?.let { runCatching { it.close() } }
         replayTunnel = null
+        onvifUrlCache.clear()
+        streamUrlCache.clear()
         store.clear()
         cache.clear()
         credentials = null
@@ -368,6 +455,19 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 accountSignedIn = true
                 accountName  = resp.name
                 accountEmail = resp.email ?: email
+                // Persist a cloud-session marker so the restore path on next launch
+                // knows to check the cookie rather than forcing a fresh login.
+                store.save(NvrCredentials(
+                    host = "", port = 80, username = "", password = "",
+                    remote = true, deviceId = "",
+                    accountEmail = resp.email ?: email,
+                    accountName  = resp.name ?: "",
+                    accountAbdName = "",
+                ))
+                loginActivity = loginActivity + LoginEvent(
+                    epochMs = System.currentTimeMillis(),
+                    email   = resp.email ?: email,
+                )
                 onSuccess()
             } catch (t: Throwable) {
                 loginStatus = friendlyHttpError(t)
@@ -561,10 +661,32 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
      *
      * `stream` follows the publisher's convention: 1=sub, 0=main.
      */
+    // Cache ONVIF-resolved RTSP URLs for this session so the 1.5 s TCP probe
+    // + SOAP round-trip only happen once per channel per stream type.
+    // Key: "$channelId-$stream". Cleared on logout / NVR switch.
+    private val onvifUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    // Cache fully-resolved RTSP URLs (including tunnel rewrite) so re-entering
+    // the live page returns the URL instantly without a publisher HTTP round-trip.
+    // Key: "$channelId-$stream". Invalidated on logout / session rebuild.
+    private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     suspend fun ensureChannelStreamUrl(channelId: Int, stream: Int = 1): String? {
         val creds = credentials ?: return null
-        val api = publisher() ?: return null
         val streamType = if (stream == 0) "main" else "sub"
+        val cacheKey = "$channelId-$stream"
+
+        // Return cached URL when the underlying sessions are still alive,
+        // skipping the publisher HTTP round-trip on live-page re-entry.
+        streamUrlCache[cacheKey]?.let { cached ->
+            val valid = !creds.remote ||
+                (sessions["${creds.deviceId}-c$channelId"]?.isAlive == true &&
+                 publisherTunnel?.isAlive == true)
+            if (valid) return cached
+            streamUrlCache.remove(cacheKey)
+        }
+
+        val api = publisher() ?: return null
 
         val resolved = try {
             api.channelStream(channelId, streamType)
@@ -586,29 +708,34 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             // LAN: for ONVIF cameras whose RTSP is directly reachable, ask the
             // camera itself (ONVIF GetStreamUri) for the correct path + creds
             // instead of trusting the publisher's generic /ch0_<n>.264 template.
-            // Cameras only reachable via the NVR fall back to the publisher URL.
+            // Result is cached for the session so we don't re-probe on every retry.
             onvifDirectStreamUrl(channelId, stream) ?: resolved.url
         }
 
-        return maybeWrapTls(routed, channelId)
+        val result = maybeWrapTls(routed, channelId)
+        streamUrlCache[cacheKey] = result
+        return result
     }
 
-    /** LAN-only ONVIF self-resolution. Returns null (→ caller uses the publisher
-     *  URL) for non-ONVIF cams, missing IP, or cams whose RTSP isn't directly
-     *  reachable from the phone (e.g. cameras only reachable via the NVR relay). */
+    /** LAN-only ONVIF self-resolution with session cache. Returns null (→ caller
+     *  uses the publisher URL) for non-ONVIF cams, missing IP, or unreachable RTSP. */
     private suspend fun onvifDirectStreamUrl(channelId: Int, stream: Int): String? {
+        val cacheKey = "$channelId-$stream"
+        onvifUrlCache[cacheKey]?.let { return it }
+
         val entry = findIpCamEntry(channelId) ?: return null
         if (!entry.optString("Protocolname").equals("ONVIF", ignoreCase = true)) return null
         val ip = entry.optString("IPAddr").ifBlank { return null }
-        if (!tcpReachable(ip, 554, 1500)) return null
+        if (!tcpReachable(ip, 554, 400)) return null
         val url = OnvifResolver.resolveStreamUri(
             ip = ip,
             onvifPort = entry.optInt("Port", 80),
             user = entry.optString("Username", "admin"),
             pass = entry.optString("Password", ""),
             wantSub = stream != 0,
-        )
-        if (url != null) android.util.Log.i("NvrViewModel", "ONVIF-resolved ch$channelId -> $url")
+        ) ?: return null
+        android.util.Log.i("NvrViewModel", "ONVIF-resolved ch$channelId -> $url")
+        onvifUrlCache[cacheKey] = url
         return url
     }
 
@@ -685,6 +812,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     // updated from /netsdk/Stat/DeviceInfo on login.
     var maxChannels by mutableStateOf(4)
         private set
+
+    // Per-device channel count cache: deviceId → real MAX_CHN (survives screen nav).
+    val channelCountCache = mutableStateMapOf<String, Int>()
 
     fun refreshChannels() {
         val a = api ?: return
@@ -913,32 +1043,29 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         searchBusy = true
-        ipCamInfoStatus = "Searching LAN (N1 + ONVIF + sweep)…"
+        // In remote (P2P) mode the phone may be on a different subnet than the NVR,
+        // so ONVIF WS-Discovery and the subnet sweep would scan the wrong network.
+        // Only the NVR-side R.SEARCH.Ipc call reaches cameras on the NVR's LAN.
+        val isRemote = credentials?.remote == true
+        ipCamInfoStatus = if (isRemote) "Scanning cameras on NVR's network…"
+                          else "Scanning cameras (N1 + ONVIF + sweep)…"
         viewModelScope.launch {
             try {
-                // Three discovery passes in parallel — each catches what the
-                // others miss. Merged + deduped by MAC, then IP.
-                //   1. NVR `R.SEARCH.Ipc` — N1 / HICHIP cameras (proprietary
-                //      probe; has MAC, model, ODM # — richest metadata).
-                //   2. ONVIF WS-Discovery — every brand that implements ONVIF
-                //      Profile S/T with discovery ENABLED (most modern cams).
-                //   3. Subnet TCP sweep — fallback for cameras with ONVIF
-                //      disabled (typical for consumer CP Plus / Dahua Wi-Fi
-                //      cams like CP-E31Q) — probes ports 554/80 across the
-                //      phone's own /24 and identifies by HTTP banner.
                 val ctx = getApplication<Application>().applicationContext
                 val n1Job = async(Dispatchers.IO) {
                     runCatching { a.searchIpcWithResults() }.getOrElse { JSONArray() }
                 }
-                val onvifJob = async(Dispatchers.IO) {
+                // ONVIF WS-Discovery and subnet sweep target the phone's local network.
+                // Skip them in remote mode — they'd find cameras the NVR can't reach.
+                val onvifJob = if (isRemote) null else async(Dispatchers.IO) {
                     runCatching { OnvifDiscovery.scan(ctx, timeoutMs = 4000) }.getOrElse { emptyList() }
                 }
-                val sweepJob = async(Dispatchers.IO) {
+                val sweepJob = if (isRemote) null else async(Dispatchers.IO) {
                     runCatching { SubnetSweep.scan(ctx, perHostTimeoutMs = 600) }.getOrElse { emptyList() }
                 }
                 val n1 = n1Job.await()
-                val onvif = onvifJob.await()
-                val sweep = sweepJob.await()
+                val onvif = onvifJob?.await() ?: emptyList()
+                val sweep = sweepJob?.await() ?: emptyList()
 
                 // Merge by MAC if present, else by IP. Priority: N1 (richest
                 // metadata) > ONVIF (vendor + model from Scopes) > sweep
@@ -1117,10 +1244,14 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     @Volatile private var statusRefreshing = false
+    @Volatile private var lastConnectedMs = 0L
 
     fun loadConnectedChannels() {
         val a = api ?: return
         if (statusRefreshing) return
+        val now = System.currentTimeMillis()
+        if (now - lastConnectedMs < 8_000L && lastConnectedMs != 0L) return
+        lastConnectedMs = now
         statusRefreshing = true
         viewModelScope.launch {
             try {
@@ -1160,13 +1291,16 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var searchJob: Job? = null
+
     /** Search one channel's recordings for the UTC day containing [dayUtcMillis]. */
     fun searchRecordings(channelId: Int, dayUtcMillis: Long) {
         val a = api ?: run { recordSearchStatus = "Not connected"; return }
+        searchJob?.cancel()            // cancel any in-flight search so its result can't overwrite ours
         recordSearchBusy = true
         recordSearchStatus = null
         recordSegments = null
-        viewModelScope.launch {
+        searchJob = viewModelScope.launch {
             try {
                 val date = java.time.Instant.ofEpochMilli(dayUtcMillis)
                     .atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()
@@ -1200,7 +1334,11 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 recordSegments = out
                 recordSearchStatus = if (out.isEmpty()) "No recordings for that day" else null
                 android.util.Log.i("NvrViewModel", "searchRecordings ch$channelId $date -> ${out.size} segments")
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                // superseded by a newer search — leave status/segments as-is
             } catch (t: Throwable) {
+                // If cancelled while the blocking HTTP call was in-flight, skip the stale status update
+                if (!isActive) return@launch
                 recordSearchStatus = "Search failed: ${t.message}"
                 android.util.Log.w("NvrViewModel", "searchRecordings failed: ${t.message}")
             } finally {
@@ -1241,6 +1379,152 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         replayTunnel = ns
         android.util.Log.i("NvrViewModel", "replay tunnel ready: $sid -> 127.0.0.1:${ns.localPort}")
         return "127.0.0.1" to ns.localPort
+    }
+
+    // ------------------------------------------------------------------
+    // Download recording — captures a RecordSegment to the device's
+    // Movies/ArcisNVR folder via the :10000 replay WebSocket protocol.
+    // Muxes the raw H.265/H.264 NALUs into an MP4 file via MediaMuxer.
+    // ------------------------------------------------------------------
+    var downloadProgress  by mutableStateOf<Float?>(null)
+    var downloadStatus    by mutableStateOf<String?>(null)
+    @Volatile private var activeDownloadClient: WsReplayClient? = null
+
+    fun downloadRecording(segment: RecordSegment) {
+        if (downloadProgress != null) return
+        val ctx   = getApplication<Application>()
+        val creds = credentials ?: run { downloadStatus = "Not connected"; return }
+        viewModelScope.launch(Dispatchers.IO) {
+            withContext(Dispatchers.Main) { downloadProgress = 0f; downloadStatus = "Opening replay…" }
+
+            val ep = replayEndpoint() ?: run {
+                withContext(Dispatchers.Main) {
+                    downloadProgress = null; downloadStatus = "Cannot open replay tunnel"
+                }
+                return@launch
+            }
+
+            val totalSec  = (segment.endSec - segment.startSec).coerceAtLeast(1).toFloat()
+            val tmpFile   = File(ctx.cacheDir, "nvr_dl_${segment.startSec}.mp4")
+            var muxer: MediaMuxer? = null
+            var trackIdx  = -1
+            var frameCount = 0L
+            val latch     = CountDownLatch(1)
+            var endNormal = false
+
+            // IOTDaemon on port 10000 validates credentials; P2P creds are empty strings
+            // (cloud-auth mode), so fall back to NVR factory admin user.
+            val wsUser = creds.username.ifBlank { "admin" }
+            val wsPass = creds.password
+            val wsClient = WsReplayClient(
+                ep.first, ep.second, wsUser, wsPass,
+                segment.channel, segment.startSec, segment.endSec,
+                onFrame = { codec, isKey, w, h, data, _ ->
+                    if (muxer == null) {
+                        if (!isKey) return@WsReplayClient
+                        val fmt = MediaFormat.createVideoFormat(
+                            codec, w.coerceIn(16, 7680), h.coerceIn(16, 4320))
+                        val m = MediaMuxer(tmpFile.absolutePath,
+                            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                        trackIdx = m.addTrack(fmt)
+                        m.start()
+                        muxer = m
+                        viewModelScope.launch(Dispatchers.Main) { downloadStatus = "Downloading…" }
+                    }
+                    val m = muxer ?: return@WsReplayClient
+                    val ptsUs = frameCount * 33333L
+                    val bb    = java.nio.ByteBuffer.wrap(data)
+                    val info  = MediaCodec.BufferInfo().also {
+                        it.set(0, data.size, ptsUs,
+                            if (isKey) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0)
+                    }
+                    runCatching { m.writeSampleData(trackIdx, bb, info) }
+                    frameCount++
+                    if (frameCount % 30L == 0L) {
+                        val prog = (ptsUs / 1_000_000f / totalSec).coerceIn(0f, 0.99f)
+                        viewModelScope.launch(Dispatchers.Main) { downloadProgress = prog }
+                    }
+                },
+                onStatus = {},
+                onError  = { msg ->
+                    endNormal = msg.contains("closed", ignoreCase = true)
+                    latch.countDown()
+                },
+            )
+            activeDownloadClient = wsClient
+            wsClient.start()
+
+            val timeoutMs = ((totalSec + 60f) * 1000f).toLong()
+            latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            wsClient.stop()
+            activeDownloadClient = null
+
+            runCatching { muxer?.stop() }
+            runCatching { muxer?.release() }
+
+            if (!endNormal || frameCount == 0L) {
+                tmpFile.delete()
+                withContext(Dispatchers.Main) { downloadProgress = null; downloadStatus = "Download failed" }
+                return@launch
+            }
+
+            // Copy temp file → MediaStore (Movies/ArcisNVR)
+            val cv = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME,
+                    "NVR_Ch${segment.channel + 1}_${segment.startSec}.mp4")
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ArcisNVR")
+            }
+            val uri = ctx.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv)
+            if (uri != null) {
+                ctx.contentResolver.openOutputStream(uri)?.use { out ->
+                    tmpFile.inputStream().use { it.copyTo(out) }
+                }
+            }
+            tmpFile.delete()
+
+            withContext(Dispatchers.Main) {
+                downloadProgress = null
+                downloadStatus = if (uri != null) "Saved to Movies/ArcisNVR" else "Save failed"
+            }
+        }
+    }
+
+    fun cancelDownload() {
+        activeDownloadClient?.stop()
+        activeDownloadClient = null
+        downloadProgress = null
+        downloadStatus   = null
+    }
+
+    var batchRemaining by mutableStateOf(0)
+        private set
+    private var batchJob: Job? = null
+
+    fun startBatchDownload(segments: List<RecordSegment>) {
+        if (segments.isEmpty()) return
+        batchJob?.cancel()
+        batchRemaining = segments.size
+        batchJob = viewModelScope.launch {
+            for (seg in segments) {
+                if (!isActive) break
+                while (downloadProgress != null && isActive) kotlinx.coroutines.delay(300)
+                if (!isActive) break
+                downloadRecording(seg)
+                kotlinx.coroutines.delay(600)
+                while (downloadProgress != null && isActive) kotlinx.coroutines.delay(300)
+                if (!isActive) break
+                batchRemaining = (batchRemaining - 1).coerceAtLeast(0)
+            }
+            batchRemaining = 0
+        }
+    }
+
+    fun cancelBatchDownload() {
+        batchJob?.cancel()
+        batchJob = null
+        batchRemaining = 0
+        cancelDownload()
     }
 
     // ------------------------------------------------------------------
@@ -1329,14 +1613,89 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun ptzGotoPreset(channelId: Int, preset: Int) {
-        // Publisher /api/channels/<n>/ptz currently only supports move + stop.
-        // ONVIF GotoPreset is a separate SOAP call; will be added in a
-        // follow-up. Surface a clean status so the UI doesn't dangle.
-        ptzStatus = "Presets not yet wired to NVR dispatcher (preset $preset)"
+        val a = api ?: run { ptzStatus = "Not connected"; return }
+        viewModelScope.launch {
+            try {
+                a.preset(channelId, "goto", preset)
+                ptzStatus = null
+            } catch (e: Exception) {
+                val msg = (e as? NetSdkException)?.responseBody?.take(80) ?: e.message?.take(80)
+                ptzStatus = "Preset $preset: ${msg ?: "error"}"
+            }
+        }
     }
 
     fun ptzSetPreset(channelId: Int, preset: Int) {
-        ptzStatus = "Presets not yet wired to NVR dispatcher (preset $preset)"
+        val a = api ?: run { ptzStatus = "Not connected"; return }
+        viewModelScope.launch {
+            try {
+                a.preset(channelId, "set", preset)
+                ptzStatus = "Preset $preset saved"
+            } catch (e: Exception) {
+                val msg = (e as? NetSdkException)?.responseBody?.take(80) ?: e.message?.take(80)
+                ptzStatus = "Save failed: ${msg ?: "error"}"
+            }
+        }
+    }
+
+    // Auto Cruise — software: cycle presets 1-8 with a configurable dwell time
+    var autoCruiseActive by mutableStateOf(false)
+        private set
+    private var cruiseJob: Job? = null
+
+    fun startAutoCruise(channelId: Int, intervalSec: Int = 8) {
+        cruiseJob?.cancel()
+        autoCruiseActive = true
+        cruiseJob = viewModelScope.launch {
+            val a = api ?: run { autoCruiseActive = false; return@launch }
+            var preset = 1
+            while (isActive) {
+                runCatching { a.preset(channelId, "goto", preset) }
+                kotlinx.coroutines.delay(intervalSec * 1_000L)
+                preset = if (preset >= 8) 1 else preset + 1
+            }
+        }
+    }
+
+    fun stopAutoCruise() {
+        cruiseJob?.cancel()
+        cruiseJob = null
+        autoCruiseActive = false
+    }
+
+    fun ptzCalibrate(channelId: Int) {
+        val a = api ?: run { ptzStatus = "Not connected"; return }
+        viewModelScope.launch {
+            try {
+                a.preset(channelId, "goto", 0)
+                ptzStatus = "Calibrated to home"
+            } catch (e: Exception) {
+                ptzStatus = "Calibration sent"
+            }
+            kotlinx.coroutines.delay(2_000)
+            ptzStatus = null
+        }
+    }
+
+    // ── Camera alarm (NVR hardware output) ───────────────────────────────────
+    var cameraAlarmActive by mutableStateOf(false)
+        private set
+    private var alarmJob: Job? = null
+
+    fun triggerCameraAlarm(channelId: Int, durationSec: Int = 10) {
+        alarmJob?.cancel()
+        cameraAlarmActive = true
+        alarmJob = viewModelScope.launch {
+            runCatching { api?.triggerSiren(durationSec) }
+            kotlinx.coroutines.delay(durationSec * 1_000L)
+            cameraAlarmActive = false
+        }
+    }
+
+    fun stopCameraAlarm(channelId: Int) {
+        alarmJob?.cancel()
+        viewModelScope.launch { runCatching { api?.stopSiren() } }
+        cameraAlarmActive = false
     }
 
     /** Pull the human-readable bit out of the publisher's JSON error.
@@ -1370,6 +1729,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     fun loadOrdinary() = launchBlock({ api?.deviceInfo() }) {
         deviceInfo = it
         maxChannels = it.optString("MAX_CHN").toIntOrNull()?.takeIf { n -> n in 1..32 } ?: maxChannels
+        credentials?.deviceId?.takeIf { id -> id.isNotBlank() }
+            ?.let { id -> channelCountCache[id] = maxChannels }
         android.util.Log.i("NvrViewModel", "deviceInfo MAX_CHN=$maxChannels")
     }
     fun loadGeneral() = launchBlock({ api?.general() }) { general = it }
@@ -1389,10 +1750,109 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         launchSave({ api?.setSmtp(updated) }, "SMTP saved") { loadSmtp() }
     fun saveWifi(updated: JSONObject) =
         launchSave({ api?.setWifi(updated) }, "Wi-Fi saved") { loadWifi() }
-    fun saveEncode(updated: JSONArray) =
-        launchSave({ api?.setStreamEncode(updated) }, "Encoding saved") { loadEncode() }
+    fun saveEncode(updated: JSONArray) {
+        viewModelScope.launch {
+            settingStatus = null
+            try {
+                api?.setStreamEncode(updated)
+                settingStatus = "Encoding saved"
+                loadEncode()
+                // Encoding changes (resolution/FPS/bitrate) cause the camera to restart its
+                // RTSP stream. Give the camera 3s to restart, then reconnect VLC.
+                kotlinx.coroutines.delay(3_000)
+                streamRefreshToken++
+            } catch (t: Throwable) {
+                settingStatus = "Failed: ${t.message}"
+            }
+        }
+    }
     fun saveOsd(updated: JSONObject) =
         launchSave({ api?.setStream(updated) }, "OSD saved") { loadOsd() }
+
+    /** Bumped after any settings change that causes the camera to restart its
+     *  RTSP stream (IR cut mode, encoding). LiveScreen observes this to reconnect VLC. */
+    var streamRefreshToken by mutableStateOf(0)
+        private set
+
+    fun saveIrcutMode(channelId: Int, mode: String) {
+        val a = api ?: run { settingStatus = "Not connected"; return }
+        viewModelScope.launch {
+            settingStatus = null
+            try {
+                val arr = JSONArray().put(JSONObject().put("ID", channelId).put("IrcutModeCur", mode))
+                a.setStreamIrcut(arr)
+                settingStatus = null
+                kotlinx.coroutines.delay(2_500)
+                streamRefreshToken++
+            } catch (t: Throwable) {
+                settingStatus = "Save failed: ${t.message}"
+            }
+        }
+    }
+
+    // ---- Siren / buzzer -------------------------------------------------------
+    var sirenActive by mutableStateOf(false)
+        private set
+
+    fun triggerSiren() {
+        val a = api ?: run { settingStatus = "Not connected"; return }
+        viewModelScope.launch {
+            try {
+                a.triggerSiren(durationSec = 10)
+                sirenActive = true
+                settingStatus = "Siren triggered"
+                kotlinx.coroutines.delay(10_000)
+                sirenActive = false
+            } catch (t: Throwable) {
+                settingStatus = "Siren failed: ${t.message}"
+                sirenActive = false
+            }
+        }
+    }
+
+    fun stopSiren() {
+        val a = api ?: return
+        viewModelScope.launch {
+            runCatching { a.stopSiren() }
+            sirenActive = false
+            settingStatus = "Siren stopped"
+        }
+    }
+
+    // ---- Motion Detection -------------------------------------------------------
+    var motionDetectionCfg by mutableStateOf<JSONObject?>(null)
+
+    fun loadMotionDetection() = launchBlock({ api?.event() }) { motionDetectionCfg = it }
+
+    fun saveMotionDetection(channelId: Int, mdEnable: Boolean, humanEnable: Boolean, appAlarm: Boolean) {
+        val a = api ?: run { settingStatus = "Not connected"; return }
+        viewModelScope.launch {
+            try {
+                val full = a.event()
+                val mdArr = full.optJSONArray("MotionDetection") ?: JSONArray()
+                for (i in 0 until mdArr.length()) {
+                    val ch = mdArr.getJSONObject(i)
+                    if (ch.optInt("ID") == channelId) {
+                        ch.put("MDEnable", if (mdEnable) "True" else "False")
+                        val humanArr = ch.optJSONArray("humanDetect") ?: JSONArray()
+                        for (j in 0 until humanArr.length()) {
+                            humanArr.getJSONObject(j).put("HumanEnable", if (humanEnable) "True" else "False")
+                        }
+                        val actions = ch.optJSONObject("Actions")
+                        actions?.put("AppAlarm", if (appAlarm) "True" else "False")
+                        break
+                    }
+                }
+                full.put("MotionDetection", mdArr)
+                a.setEvent(full)
+                settingStatus = "Motion detection saved"
+                motionDetectionCfg = a.event()
+            } catch (t: Throwable) {
+                settingStatus = "Save failed: ${t.message}"
+            }
+        }
+    }
+
     fun rebootNvr() =
         launchSave({ api?.reboot() }, "Reboot sent") {}
     fun testSmtp() =
@@ -1402,6 +1862,22 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     fun loadGeneralTime() = launchBlock({ api?.generalTime() }) { generalTimeCfg = it }
     fun saveGeneralTime(updated: JSONObject) =
         launchSave({ api?.setGeneralTime(updated) }, "Time saved") { loadGeneralTime() }
+
+    fun syncTimeWithPhone(onDone: (Boolean, String) -> Unit) {
+        val a = api ?: run { onDone(false, "Not connected"); return }
+        viewModelScope.launch {
+            try {
+                val now = java.time.LocalDateTime.now(java.time.ZoneOffset.UTC)
+                val fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+                a.setSystemTime(org.json.JSONObject().put("DateTime", now.format(fmt)))
+                withContext(kotlinx.coroutines.Dispatchers.Main) { onDone(true, "Device time synced") }
+            } catch (t: Throwable) {
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onDone(false, "Sync failed: ${t.message}")
+                }
+            }
+        }
+    }
 
     // ---- Scheduled Maintenance --------------------------------------------
     fun loadGeneralMaint() = launchBlock({ api?.generalMaintenance() }) { generalMaintCfg = it }
@@ -1485,20 +1961,25 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     //
     // We keep one JSONObject per channel (channelId → settings).
     var perChannelColor by mutableStateOf<Map<Int, JSONObject>>(emptyMap())
+    var perChannelColorFailed by mutableStateOf<Set<Int>>(emptySet())
 
     fun loadColorFor(channelId: Int) {
         viewModelScope.launch {
+            perChannelColorFailed = perChannelColorFailed - channelId
             try {
                 val pub = publisher() ?: run {
                     settingStatus = "Publisher unreachable"
+                    perChannelColorFailed = perChannelColorFailed + channelId
                     return@launch
                 }
                 val obj = pub.imageGet(channelId)
                 perChannelColor = perChannelColor.toMutableMap().apply { put(channelId, obj) }
             } catch (t: NetSdkException) {
                 settingStatus = "Camera ${channelId + 1} image read failed: HTTP ${t.httpCode}"
+                perChannelColorFailed = perChannelColorFailed + channelId
             } catch (t: Throwable) {
                 settingStatus = "Camera ${channelId + 1} image read failed: ${t.message}"
+                perChannelColorFailed = perChannelColorFailed + channelId
             }
         }
     }
@@ -1533,6 +2014,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun launchSave(call: suspend () -> String?, okMessage: String, then: () -> Unit) {
         viewModelScope.launch {
+            settingStatus = null  // ensure LaunchedEffect fires even on repeated identical saves
             try {
                 call()
                 settingStatus = okMessage

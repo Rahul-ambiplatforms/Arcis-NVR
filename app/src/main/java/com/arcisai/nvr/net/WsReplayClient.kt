@@ -1,4 +1,4 @@
-package com.arcisai.nvr.net
+﻿package com.arcisai.nvr.net
 
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -31,7 +31,7 @@ class WsReplayClient(
     private val channel: Int,
     private val beginEpoch: Long,
     private val endEpoch: Long,
-    private val onFrame: (codec: String, isKey: Boolean, width: Int, height: Int, data: ByteArray) -> Unit,
+    private val onFrame: (codec: String, isKey: Boolean, width: Int, height: Int, data: ByteArray, timestampSec: Long) -> Unit,
     private val onStatus: (String) -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -195,6 +195,8 @@ class WsReplayClient(
         if (headtype != 1) return                // replay only
         if (inner.size < pos + 16 + 24) return
         val frametype = u32(inner, pos)           // replay_head[0]: 1=IFRAME, 2=PFRAME
+        // replay_head[8..11]: firmware embeds a seconds-since-epoch timestamp here
+        val timestampSec = u32(inner, pos + 8).toLong() and 0xFFFFFFFFL
         pos += 16
         val enc = String(inner, pos, 8, Charsets.US_ASCII).trimEnd(' ', ' ')
         pos += 24                                 // video_param; replay body follows with NO +8
@@ -203,7 +205,7 @@ class WsReplayClient(
         val width = u32(inner, pos - 24 + 12)
         val height = u32(inner, pos - 24 + 16)
         val codec = if (enc.contains("265") || enc.contains("HEVC", true)) "video/hevc" else "video/avc"
-        onFrame(codec, frametype == 1, width, height, body)
+        onFrame(codec, frametype == 1, width, height, body, timestampSec)
     }
 
     private fun startPing() {

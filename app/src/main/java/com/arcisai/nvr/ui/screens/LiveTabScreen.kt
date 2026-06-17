@@ -264,15 +264,16 @@ private fun DeviceCard(
                 }
             }
 
-            // ── 2×2 camera grid ───────────────────────────────────────────────
+            // ── adaptive camera grid (2 cols for ≤4 ch, 4 cols for 5+) ─────────
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f)
+                    .aspectRatio(if (channels.size <= 4) 1f else 2f)
                     .background(Color.Black)
                     .clickable { onChannelTap(tapChannel) },
             ) {
-                val rows = channels.take(4).chunked(2)
+                val previewCols = if (channels.size <= 4) 2 else 4
+                val rows = channels.chunked(previewCols)
                 Column(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(1.dp),
@@ -291,7 +292,7 @@ private fun DeviceCard(
                                     thumbnail = thumbnails[ch.id],
                                 )
                             }
-                            if (row.size < 2) {
+                            repeat(previewCols - row.size) {
                                 Box(
                                     Modifier.weight(1f).fillMaxHeight()
                                         .background(Color(0xFF111113)),

@@ -40,6 +40,11 @@ fun MyNvrsScreen(
     onLogout: () -> Unit,
 ) {
     LaunchedEffect(Unit) { vm.loadAbds() }
+    // Start pre-warming P2P as soon as the device list appears — by the time
+    // the user taps a device, ICE is often already done (saves 10-20 s).
+    LaunchedEffect(vm.myAbds) {
+        if (vm.myAbds.isNotEmpty()) vm.prewarmP2p(vm.myAbds.map { it.deviceId })
+    }
     var showAdd by remember { mutableStateOf(false) }
     // Name of the NVR we're currently opening — drives the "Connecting…" dialog
     // so a tap gives immediate feedback instead of looking like nothing happened
@@ -105,7 +110,9 @@ fun MyNvrsScreen(
                         items(vm.myAbds, key = { it.deviceId.ifBlank { it._id ?: it.name } }) { abd ->
                             val online = abd.status.equals("online", ignoreCase = true) ||
                                 vm.sessionOnlineIds.contains(abd.deviceId)
-                            AbdRow(abd, online = online, enabled = !vm.loginBusy, onTap = {
+                            AbdRow(abd, online = online,
+                                channelCount = vm.channelCountCache[abd.deviceId] ?: abd.channel,
+                                enabled = !vm.loginBusy, onTap = {
                                 connectingName = abd.name.ifBlank { abd.deviceId }
                                 vm.selectAbd(abd, onNvrSelected)
                             })
@@ -135,7 +142,7 @@ fun MyNvrsScreen(
 }
 
 @Composable
-private fun AbdRow(abd: AbdDto, online: Boolean, enabled: Boolean = true, onTap: () -> Unit) {
+private fun AbdRow(abd: AbdDto, online: Boolean, channelCount: Int?, enabled: Boolean = true, onTap: () -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -163,7 +170,7 @@ private fun AbdRow(abd: AbdDto, online: Boolean, enabled: Boolean = true, onTap:
                 Text(abd.name.ifBlank { abd.deviceId }, fontWeight = FontWeight.SemiBold)
                 Text(
                     abd.deviceId + (abd.productType?.let { " · $it" } ?: "") +
-                        (abd.channel?.let { " · ${it} ch" } ?: ""),
+                        (channelCount?.let { " · $it ch" } ?: ""),
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

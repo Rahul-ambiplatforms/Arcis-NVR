@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -15,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -31,9 +33,11 @@ fun ChannelSettingsScreen(
     channelId: Int,
     onBack: () -> Unit,
     onNavigate: (String) -> Unit,
+    onOpenLive: (channelId: Int) -> Unit = {},
+    onOpenNightMode: (channelId: Int) -> Unit = {},
 ) {
-    val ch       = vm.channels.getOrNull(channelId)
-    val isOnline = vm.connectedChannels?.contains(channelId) == true
+    val ch        = vm.channels.getOrNull(channelId)
+    val isOnline  = vm.connectedChannels?.contains(channelId) == true
     val clipboard = LocalClipboardManager.current
 
     var displayName  by remember(channelId) { mutableStateOf(vm.channelDisplayName(channelId)) }
@@ -46,6 +50,7 @@ fun ChannelSettingsScreen(
     val label   = MaterialTheme.colorScheme.onSurfaceVariant
     val divClr  = MaterialTheme.colorScheme.outlineVariant
     val chevron = MaterialTheme.colorScheme.outline
+    val primary = MaterialTheme.colorScheme.primary
 
     Scaffold(
         topBar = {
@@ -81,45 +86,77 @@ fun ChannelSettingsScreen(
                         modifier = Modifier.padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(80.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(
-                                Icons.Default.Videocam, null,
-                                tint     = label.copy(alpha = 0.6f),
-                                modifier = Modifier.size(38.dp),
-                            )
+                        // Camera avatar with online indicator
+                        Box(modifier = Modifier.size(72.dp)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (isOnline) primary.copy(alpha = 0.12f)
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    Icons.Default.Videocam, null,
+                                    tint     = if (isOnline) primary else label.copy(alpha = 0.5f),
+                                    modifier = Modifier.size(34.dp),
+                                )
+                            }
+                            // Online dot
+                            Box(
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surface)
+                                    .align(Alignment.BottomEnd),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(if (isOnline) ArcisGreen else Color(0xFFBDBDBD)),
+                                )
+                            }
                         }
+
                         Spacer(Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(displayName,
+                                Text(
+                                    displayName,
                                     fontWeight = FontWeight.Bold, fontSize = 16.sp,
                                     maxLines   = 1, overflow = TextOverflow.Ellipsis,
-                                    modifier   = Modifier.weight(1f, fill = false))
+                                    modifier   = Modifier.weight(1f, fill = false),
+                                )
                                 Spacer(Modifier.width(6.dp))
                                 Icon(Icons.Default.Edit, "Rename", tint = label,
                                     modifier = Modifier.size(16.dp).clickable {
                                         renameDraft = displayName; showRename = true
                                     })
                             }
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                if (isOnline) "Online" else "Offline",
+                                fontSize = 12.sp,
+                                color    = if (isOnline) ArcisGreen else MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Medium,
+                            )
                             if (ch != null && ch.modelName.isNotBlank()) {
-                                Spacer(Modifier.height(4.dp))
-                                Text("Model: ${ch.modelName}", fontSize = 13.sp, color = label)
+                                Spacer(Modifier.height(3.dp))
+                                Text(ch.modelName, fontSize = 12.sp, color = label, maxLines = 1)
                             }
                             if (ch != null && ch.ipAddr.isNotBlank()) {
                                 Spacer(Modifier.height(2.dp))
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("IP: ${ch.ipAddr}", fontSize = 13.sp, color = label,
+                                    Text(ch.ipAddr, fontSize = 12.sp, color = label,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false))
                                     Spacer(Modifier.width(4.dp))
                                     Icon(Icons.Default.ContentCopy, "Copy IP", tint = label,
-                                        modifier = Modifier.size(14.dp).clickable {
+                                        modifier = Modifier.size(13.dp).clickable {
                                             clipboard.setText(AnnotatedString(ch.ipAddr))
                                         })
                                 }
@@ -129,65 +166,125 @@ fun ChannelSettingsScreen(
                 }
             }
 
-            // ── Base Station row ──────────────────────────────────────────
+            // ── Live View quick-access ────────────────────────────────────
             item {
                 ChGroup(surface) {
-                    ChValueRow(
-                        title   = "Base Station",
-                        value   = if (isOnline) "Connected" else "Not Connected",
-                        label   = label,
-                        chevron = chevron,
-                        onClick = {},
+                    ChIconNavRow(
+                        icon    = Icons.Default.PlayCircle,
+                        iconBg  = Color(0xFF1E88E5),
+                        title   = "Open Live View",
+                        label   = label, chevron = chevron,
+                        onClick = { onOpenLive(channelId) },
                     )
                 }
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(20.dp))
             }
 
-            // ── Motion Detection and Notifications ────────────────────────
-            item { ChSectionHeader("Motion Detection and Notifications") }
+            // ── Camera Vision Mode ────────────────────────────────────────
+            item { ChSectionHeader("Camera Vision Mode") }
             item {
                 ChGroup(surface) {
-                    ChNavRow("Motion Detection Alerts",    label, chevron) {}
-                    ChDividerRow(divClr)
-                    ChNavRow("Push Notification Settings", label, chevron) {}
+                    ChIconNavRow(
+                        icon    = Icons.Default.NightsStay,
+                        iconBg  = Color(0xFF4527A0),
+                        title   = "Camera Vision Mode",
+                        subtitle = "Day, night or auto IR-cut scheduling",
+                        label   = label, chevron = chevron,
+                        onClick = { onOpenNightMode(channelId) },
+                    )
                 }
+                Spacer(Modifier.height(20.dp))
+            }
+
+            // ── PTZ Control ───────────────────────────────────────────────
+            item { ChSectionHeader("PTZ Control") }
+            item {
+                ChGroup(surface) {
+                    ChIconNavRow(
+                        icon    = Icons.Default.Games,
+                        iconBg  = Color(0xFF00897B),
+                        title   = "PTZ Control",
+                        subtitle = "Pan, tilt, zoom and presets",
+                        label   = label, chevron = chevron,
+                        onClick = { onOpenLive(channelId) },
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
+            }
+
+            // ── Motion & Alerts ───────────────────────────────────────────
+            item { ChSectionHeader("Motion & Alerts") }
+            item {
+                ChGroup(surface) {
+                    ChIconNavRow(
+                        icon    = Icons.Default.DirectionsRun,
+                        iconBg  = Color(0xFFE53935),
+                        title   = "Motion Detection",
+                        subtitle = "Detection, human tracking & push alerts",
+                        label   = label, chevron = chevron,
+                        onClick = { onNavigate("channel-motion/$channelId") },
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
             }
 
             // ── Device Settings ───────────────────────────────────────────
             item { ChSectionHeader("Device Settings") }
             item {
                 ChGroup(surface) {
-                    ChValueRow("Recording Settings", "Continuous Recording", label, chevron) { onNavigate("encode") }
+                    ChIconNavRow(
+                        icon    = Icons.Default.Tune,
+                        iconBg  = Color(0xFF039BE5),
+                        title   = "Image & Color",
+                        subtitle = "Brightness, contrast, saturation",
+                        label   = label, chevron = chevron,
+                        onClick = { onNavigate("channel-color/$channelId") },
+                    )
                     ChDividerRow(divClr)
-                    ChNavRow("Image & Sound Settings", label, chevron) { onNavigate("color") }
-                    ChDividerRow(divClr)
-                    ChNavRow("OSD",                   label, chevron) { onNavigate("osd") }
-                    ChDividerRow(divClr)
-                    ChNavRow("PTZ Control",            label, chevron) {}
-                    ChDividerRow(divClr)
-                    ChNavRow("Storage Settings",       label, chevron) { onNavigate("disk") }
+                    ChIconNavRow(
+                        icon    = Icons.Default.Speed,
+                        iconBg  = Color(0xFF43A047),
+                        title   = "Stream Quality",
+                        subtitle = "Resolution and bitrate",
+                        label   = label, chevron = chevron,
+                        onClick = { onNavigate("channel-encode/$channelId") },
+                    )
                 }
+                Spacer(Modifier.height(20.dp))
             }
 
-            // ── Advanced Settings ─────────────────────────────────────────
-            item { ChSectionHeader("Advanced Settings") }
+            // ── Advanced ──────────────────────────────────────────────────
+            item { ChSectionHeader("Advanced") }
             item {
                 ChGroup(surface) {
-                    ChNavRow("Advanced Settings", label, chevron) { onNavigate("general") }
+                    ChIconNavRow(
+                        icon    = Icons.Default.TextFields,
+                        iconBg  = Color(0xFF757575),
+                        title   = "OSD Overlay",
+                        subtitle = "Channel name & timestamp on video",
+                        label   = label, chevron = chevron,
+                        onClick = { onNavigate("channel-osd/$channelId") },
+                    )
                 }
+                Spacer(Modifier.height(20.dp))
             }
 
             // ── About ─────────────────────────────────────────────────────
             item { ChSectionHeader("About") }
             item {
                 ChGroup(surface) {
-                    ChNavRow("About Device", label, chevron) { onNavigate("about-device") }
-                    ChDividerRow(divClr)
-                    ChNavRow("Share Device", label, chevron) {}
+                    ChIconNavRow(
+                        icon    = Icons.Default.Info,
+                        iconBg  = Color(0xFF1E88E5),
+                        title   = "About Channel",
+                        subtitle = "Model, type, network info",
+                        label   = label, chevron = chevron,
+                        onClick = { onNavigate("channel-about/$channelId") },
+                    )
                 }
             }
 
-            // ── Delete Channel ────────────────────────────────────────────
+            // ── Danger zone ───────────────────────────────────────────────
             item { Spacer(Modifier.height(32.dp)) }
             item {
                 Button(
@@ -201,7 +298,9 @@ fun ChannelSettingsScreen(
                         containerColor = MaterialTheme.colorScheme.error,
                     ),
                 ) {
-                    Text("Delete Channel", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Icon(Icons.Default.Delete, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Delete Channel", fontSize = 15.sp, fontWeight = FontWeight.Medium)
                 }
             }
         }
@@ -243,7 +342,17 @@ fun ChannelSettingsScreen(
             title = { Text("Delete Channel?") },
             text  = { Text("This will remove Channel ${channelId + 1} from the NVR.") },
             confirmButton = {
-                TextButton(onClick = { showDelete = false }) {
+                TextButton(onClick = {
+                    vm.saveIpCamEntry(
+                        channelId,
+                        mapOf(
+                            "IPAddr" to "", "Username" to "", "Password" to "",
+                            "Modelname" to "", "Enable" to "False",
+                        ),
+                    )
+                    showDelete = false
+                    onBack()
+                }) {
                     Text("Delete", color = MaterialTheme.colorScheme.error)
                 }
             },
@@ -271,15 +380,20 @@ private fun ChSectionHeader(text: String) {
     Text(
         text,
         modifier = Modifier.fillMaxWidth()
-            .padding(start = 20.dp, end = 16.dp, top = 22.dp, bottom = 7.dp),
+            .padding(start = 20.dp, end = 16.dp, top = 4.dp, bottom = 7.dp),
         fontSize = 13.sp,
+        fontWeight = FontWeight.Medium,
         color    = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
 @Composable
-private fun ChNavRow(
+private fun ChIconNavRow(
+    icon: ImageVector,
+    iconBg: Color,
     title: String,
+    subtitle: String? = null,
+    value: String? = null,
     label: Color,
     chevron: Color,
     onClick: () -> Unit,
@@ -288,33 +402,31 @@ private fun ChNavRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, fontSize = 15.sp, modifier = Modifier.weight(1f))
-        Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, null,
-            tint = chevron, modifier = Modifier.size(13.dp))
-    }
-}
-
-@Composable
-private fun ChValueRow(
-    title: String,
-    value: String,
-    label: Color,
-    chevron: Color,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, fontSize = 15.sp, modifier = Modifier.weight(1f))
-        Text(value, fontSize = 15.sp, color = label)
-        Spacer(Modifier.width(4.dp))
+        // Rounded icon badge
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(iconBg),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, null, tint = Color.White, modifier = Modifier.size(18.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 15.sp)
+            if (subtitle != null) {
+                Text(subtitle, fontSize = 12.sp, color = label, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (value != null) {
+            Text(value, fontSize = 14.sp, color = label)
+            Spacer(Modifier.width(4.dp))
+        }
         Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, null,
             tint = chevron, modifier = Modifier.size(13.dp))
     }
@@ -323,7 +435,7 @@ private fun ChValueRow(
 @Composable
 private fun ChDividerRow(divClr: Color) {
     HorizontalDivider(
-        modifier  = Modifier.padding(start = 16.dp),
+        modifier  = Modifier.padding(start = 60.dp),
         thickness = 0.5.dp,
         color     = divClr,
     )

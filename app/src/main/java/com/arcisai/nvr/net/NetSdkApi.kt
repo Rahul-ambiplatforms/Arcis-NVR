@@ -4,6 +4,7 @@ import com.arcisai.nvr.data.NvrCredentials
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
+import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -98,10 +99,34 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun streamEncode(): JSONArray = getJsonArray("/netsdk/Stream/Encode")
     suspend fun setStreamEncode(body: JSONArray): String =
         put("/netsdk/Stream/Encode", body.toString())
+    suspend fun setStreamIrcut(body: JSONArray): String =
+        put("/netsdk/Stream/Ircut", body.toString())
     suspend fun bitrate(): String = get("/netsdk/GetBitrate")
     suspend fun channelDetail(): String = get("/netsdk/GetChannelDetail")
     suspend fun ptzGet(): String = get("/netsdk/Channel/PTZ")
     suspend fun ptzSet(body: String): String = put("/netsdk/Channel/PTZ", body)
+
+    /** POST /netsdk/Preset (form-encoded).
+     *  op: "goto" | "set" | "delete", idx: 1-based preset slot. */
+    suspend fun preset(channel: Int, op: String, idx: Int = 1): String =
+        postForm("/netsdk/Preset", mapOf("chan" to channel.toString(), "op" to op, "idx" to idx.toString()))
+
+    private suspend fun postForm(path: String, params: Map<String, String>): String =
+        withContext(Dispatchers.IO) {
+            val formBody = FormBody.Builder()
+                .also { fb -> params.forEach { (k, v) -> fb.add(k, v) } }
+                .build()
+            val req = Request.Builder()
+                .url(urlOf(path))
+                .header("Authorization", authHeader)
+                .post(formBody)
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw NetSdkException(resp.code, body)
+                body
+            }
+        }
 
     // ------------------------------------------------------------------
     // Setting > Network
@@ -132,6 +157,8 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun generalTime(): JSONObject = getJson("/netsdk/General/Time")
     suspend fun setGeneralTime(body: JSONObject): String =
         put("/netsdk/General/Time", body.toString())
+    suspend fun setSystemTime(body: JSONObject): String =
+        put("/netsdk/R.SetSystemTime", body.toString())
     suspend fun generalMaintenance(): JSONObject = getJson("/netsdk/General/Maintenance")
     suspend fun setGeneralMaintenance(body: JSONObject): String =
         put("/netsdk/General/Maintenance", body.toString())
@@ -144,6 +171,17 @@ class NetSdkApi(val creds: NvrCredentials) {
     // ------------------------------------------------------------------
     suspend fun stat(): JSONObject = getJson("/netsdk/Stat")
     suspend fun statIpc(): String = get("/netsdk/Stat/IPC")
+
+    // ------------------------------------------------------------------
+    // Alarm / siren — manual trigger of NVR built-in buzzer
+    // ------------------------------------------------------------------
+    /** Trigger NVR built-in siren/buzzer for [durationSec] seconds. */
+    suspend fun triggerSiren(durationSec: Int = 10): String =
+        put("/netsdk/Event/Buzzer",
+            JSONObject().put("Enable", "True").put("Duration", durationSec).toString())
+
+    /** Stop the NVR built-in siren immediately. */
+    suspend fun stopSiren(): String = put("/netsdk/R.Alarm.CloseBuzzer")
 
     // ------------------------------------------------------------------
     // Setting > Event / Record schedule

@@ -50,6 +50,7 @@ fun ManageScreen(vm: NvrViewModel) {
     var pickingForFound by remember { mutableStateOf<JSONObject?>(null) }
     var addingThirdParty by remember { mutableStateOf(false) }
     var showAddInfo   by remember { mutableStateOf(false) }
+    var showFoundInfo by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -139,15 +140,14 @@ fun ManageScreen(vm: NvrViewModel) {
                         Icon(Icons.Default.Add, contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Text("Add by IP (Hikvision / Dahua / ONVIF / RTSP)",
-                            fontWeight = FontWeight.SemiBold)
+                        Text("Add by IP", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
 
             item { Spacer(Modifier.height(8.dp)) }
             item {
-                SectionHeader("Found on LAN", action = if (vm.searchResults != null) {
+                SectionHeader("Found on LAN", onInfo = { showFoundInfo = true }, action = if (vm.searchResults != null) {
                     { TextButton(onClick = { vm.clearSearchResults() }) { Text("Clear") } }
                 } else null)
             }
@@ -157,8 +157,7 @@ fun ManageScreen(vm: NvrViewModel) {
                     item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     } }
-                found == null ->
-                    item { HintRow("Tap “Scan LAN” to discover N1 + ONVIF cameras (any brand) on this network.") }
+                found == null -> {}  // hint is in the ⓘ info popup on the section header
                 found.length() == 0 ->
                     item { HintRow("No cameras found. Make sure the camera is powered on and on this Wi-Fi.") }
                 else -> {
@@ -249,6 +248,20 @@ fun ManageScreen(vm: NvrViewModel) {
                     "Use Add by IP for any camera that isn't discovered automatically, or " +
                     "that doesn't advertise via ONVIF — enter its IP, protocol and credentials, " +
                     "and pick the channel to bind it to."
+                )
+            },
+        )
+    }
+    if (showFoundInfo) {
+        AlertDialog(
+            onDismissRequest = { showFoundInfo = false },
+            confirmButton = { TextButton(onClick = { showFoundInfo = false }) { Text("Got it") } },
+            title = { Text("Discovering cameras") },
+            text = {
+                Text(
+                    "Tap \"Scan Cameras\" to discover cameras on the NVR's network automatically.\n\n" +
+                    "The scan finds ONVIF-compatible cameras (Hikvision, Dahua, CP Plus, Axis, …) " +
+                    "and N1 cameras. Use \"Add by IP\" for cameras not discovered automatically."
                 )
             },
         )

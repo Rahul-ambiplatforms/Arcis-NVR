@@ -1,7 +1,18 @@
 package com.arcisai.nvr.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,6 +20,8 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,8 +74,11 @@ import androidx.core.content.ContextCompat
 import com.arcisai.nvr.data.NvrCredentials
 import com.arcisai.nvr.net.WsTalkbackClient
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.snapshotFlow
 import kotlin.coroutines.resume
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
@@ -74,32 +90,50 @@ import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.widget.Toast
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import java.io.File
 
-private enum class ViewMode { GRID, SINGLE_FULL, GRID_FULL }
+private enum class ViewMode { GRID, FULL }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LiveScreen(
     viewModel: NvrViewModel,
     channelId: Int,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)? = null,
     onNavigateToPlayback: () -> Unit = {},
     onNavigateToSettings: (channelId: Int) -> Unit = {},
+    onOpenNightVision: (channelId: Int) -> Unit = {},
+    onOpenPhotos: () -> Unit = {},
 ) {
+    val isTabRoot = onBack == null
+
     LaunchedEffect(Unit) { viewModel.loadIpCamInfo() }
+
+    // Tab-root mode: refresh channels on every resume (lifecycle observer)
+    if (isTabRoot) {
+        val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+        DisposableEffect(lifecycle) {
+            val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                    viewModel.refreshChannels()
+                    viewModel.loadIpCamInfo()
+                    viewModel.loadConnectedChannels()
+                }
+            }
+            lifecycle.addObserver(obs)
+            onDispose { lifecycle.removeObserver(obs) }
+        }
+    }
 
     var selectedChannel by remember { mutableIntStateOf(channelId) }
     var viewMode by remember { mutableStateOf(ViewMode.GRID) }
     var useSub by remember { mutableStateOf(true) }
     var forceTcp by remember { mutableStateOf(true) }
     var audioMuted by remember { mutableStateOf(true) }
-    var scale by remember { mutableFloatStateOf(1f) }
     var showMoreSheet by remember { mutableStateOf(false) }
     var showPresets by remember { mutableStateOf(false) }
     var ptzSpeed by remember { mutableIntStateOf(4) }
@@ -107,6 +141,20 @@ fun LiveScreen(
     var snapshotTrigger by remember { mutableIntStateOf(0) }
     var isRecording by remember { mutableStateOf(false) }
     val activity = LocalContext.current as? Activity
+
+    // Force landscape when fullscreen; restore when exiting or leaving the screen
+    LaunchedEffect(viewMode) {
+        activity?.requestedOrientation = if (viewMode == ViewMode.FULL)
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        else
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+    DisposableEffect(Unit) {
+        onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+    }
+
+    // Camera-alarm state mirrors ViewModel — siren plays on the NVR, not the phone
+    val sirenActive = viewModel.cameraAlarmActive
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
 
@@ -121,18 +169,43 @@ fun LiveScreen(
     var fetchExhausted by remember(selectedChannel, useSub, boundIp) { mutableStateOf(false) }
     val remoteMode = viewModel.credentials?.remote == true
 
+    // Talkback endpoint — in LAN mode use credentials directly; in remote mode
+    // open (or reuse) the replay P2P tunnel which proxies port 10000.
+    var talkHost by remember { mutableStateOf(viewModel.credentials?.host ?: "") }
+    var talkPort by remember { mutableIntStateOf(10000) }
+    LaunchedEffect(remoteMode) {
+        if (remoteMode) {
+            val ep = viewModel.replayEndpoint()
+            if (ep != null) { talkHost = ep.first; talkPort = ep.second }
+        } else {
+            talkHost = viewModel.credentials?.host ?: ""
+            talkPort = 10000
+        }
+    }
+
     val deviceName = viewModel.displayNvrName
 
     LaunchedEffect(selectedChannel) {
         viewModel.selectedLiveChannel = selectedChannel
-        while (true) { viewModel.loadConnectedChannels(); kotlinx.coroutines.delay(8_000) }
+        while (true) { viewModel.loadConnectedChannels(); kotlinx.coroutines.delay(20_000) }
     }
 
-    LaunchedEffect(selectedChannel, useSub, boundIp, retryToken, offline) {
+    // When a settings change causes the camera RTSP stream to restart (IR cut, encoding),
+    // bump retryToken so VLC reconnects and shows the updated stream.
+    LaunchedEffect(viewModel.streamRefreshToken) {
+        if (viewModel.streamRefreshToken > 0) retryToken++
+    }
+
+    LaunchedEffect(selectedChannel, useSub, boundIp, retryToken) {
         fetchExhausted = false
         rtsp = null
         if (!assigned) return@LaunchedEffect
-        if (offline && !userForced) return@LaunchedEffect
+        // If offline and not force-started, wait reactively instead of restarting
+        // the whole effect on every status poll (which would stop a playing stream).
+        if (viewModel.isChannelOffline(selectedChannel) && !userForced) {
+            snapshotFlow { !viewModel.isChannelOffline(selectedChannel) || userForced }
+                .first { it }
+        }
         var attempts = 0
         while (rtsp == null && attempts < 3) {
             attempts++
@@ -149,73 +222,52 @@ fun LiveScreen(
         if (viewModel.ptzStatus != null) { delay(3_000); viewModel.ptzStatus = null }
     }
 
-    // Back: fullscreen → grid, grid → caller
-    BackHandler {
+    // Back: fullscreen → grid; grid → caller (if not tab root)
+    BackHandler(enabled = viewMode != ViewMode.GRID || onBack != null) {
         when (viewMode) {
-            ViewMode.SINGLE_FULL, ViewMode.GRID_FULL -> { viewMode = ViewMode.GRID; scale = 1f }
-            ViewMode.GRID -> onBack()
+            ViewMode.FULL -> viewMode = ViewMode.GRID
+            ViewMode.GRID -> onBack?.invoke()
         }
     }
 
-    // Lock to landscape in fullscreen, revert when back to grid
-    LaunchedEffect(viewMode) {
-        activity?.requestedOrientation = when (viewMode) {
-            ViewMode.GRID -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-            else          -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-        }
-    }
-
-    // ── FULLSCREEN overlay (hides Scaffold entirely) ─────────────────────────
-    if (viewMode != ViewMode.GRID) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            if (viewMode == ViewMode.SINGLE_FULL) {
-                val transformState = rememberTransformableState { zoom, _, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 4f)
-                }
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .transformable(transformState)
-                        .graphicsLayer { scaleX = scale; scaleY = scale },
-                ) {
-                    ChannelContent(
-                        modifier = Modifier.fillMaxSize(),
-                        rtsp = rtsp, fetchExhausted = fetchExhausted,
-                        assigned = assigned, offline = offline, userForced = userForced,
-                        forceTcp = forceTcp, remoteMode = remoteMode, audioMuted = audioMuted,
-                        onUserForced = { userForced = true; retryToken++ },
-                        onRetry = { retryToken++ },
-                        onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
-                        snapshotTrigger = snapshotTrigger,
-                        isRecording = isRecording,
-                        onRecordSaved = { name ->
-                            coroutineScope.launch {
-                                snackbarHostState.showSnackbar("Saved: $name")
-                            }
-                        },
-                    )
-                }
-            } else {
-                // GRID_FULL
-                LiveChannelGrid(
-                    modifier = Modifier.fillMaxSize(),
-                    channels = viewModel.channels.take(4),
-                    selectedChannel = selectedChannel,
-                    connectedChannels = viewModel.connectedChannels,
-                    channelStatus = viewModel.channelStatus,
-                    forceTcp = forceTcp,
-                    useSub = useSub,
-                    audioMuted = audioMuted,
-                    viewModel = viewModel,
-                    onChannelTap = { selectedChannel = it },
-                    onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
-                )
-            }
+    // ── FULLSCREEN — all channels, no controls, no orientation lock ───────────
+    if (viewMode == ViewMode.FULL) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .systemBarsPadding(),
+        ) {
+            LiveChannelGrid(
+                modifier = Modifier.fillMaxSize(),
+                channels = viewModel.channels,
+                selectedChannel = selectedChannel,
+                connectedChannels = viewModel.connectedChannels,
+                channelStatus = viewModel.channelStatus,
+                forceTcp = forceTcp,
+                remoteMode = remoteMode,
+                useSub = useSub,
+                audioMuted = audioMuted,
+                viewModel = viewModel,
+                onChannelTap = { selectedChannel = it },
+                onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
+                snapshotTrigger = snapshotTrigger,
+                isRecording = isRecording,
+                onRecordSaved = { name ->
+                    coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
+                },
+            )
+            // Tap ✕ / back arrow to exit fullscreen
             IconButton(
-                onClick = { viewMode = ViewMode.GRID; scale = 1f },
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                onClick = { viewMode = ViewMode.GRID },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp)
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.55f)),
             ) {
-                Icon(Icons.Default.FullscreenExit, "Exit fullscreen", tint = Color.White)
+                Icon(Icons.Default.FullscreenExit, "Exit fullscreen", tint = Color.White, modifier = Modifier.size(20.dp))
             }
             SnackbarHost(
                 hostState = snackbarHostState,
@@ -229,10 +281,19 @@ fun LiveScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(deviceName, fontWeight = FontWeight.Bold) },
+                title = {
+                    Text(
+                        deviceName,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = if (isTabRoot) TextAlign.Center else TextAlign.Start,
+                        modifier = if (isTabRoot) Modifier.fillMaxWidth() else Modifier,
+                    )
+                },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                        }
                     }
                 },
                 actions = {
@@ -249,55 +310,159 @@ fun LiveScreen(
             )
         },
         bottomBar = {
-            LiveBottomBar(
-                selectedChannel = selectedChannel,
-                creds = viewModel.credentials,
-                onDevice = onBack,
-                onEvents = { /* TODO: events screen */ },
-                showPresets = showPresets,
-                onPresetsToggle = { showPresets = !showPresets },
-                onMore = { showMoreSheet = true },
-            )
+            if (!isTabRoot) {
+                LiveBottomBar(
+                    selectedChannel = selectedChannel,
+                    creds = viewModel.credentials,
+                    talkHost = talkHost,
+                    talkPort = talkPort,
+                    onDevice = onBack ?: {},
+                    onEvents = { /* TODO: events screen */ },
+                    showPresets = showPresets,
+                    onPresetsToggle = { showPresets = !showPresets },
+                    onMore = { showMoreSheet = true },
+                )
+            }
         },
         containerColor = Color.Black,
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
 
-            // ── 1-channel or 4-channel grid ──────────────────────────────────
+            // ── 1-channel swipe pager or multi-channel grid ───────────────────
             if (singleChannelView) {
-                ChannelContent(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    rtsp = rtsp, fetchExhausted = fetchExhausted,
-                    assigned = assigned, offline = offline, userForced = userForced,
-                    forceTcp = forceTcp, remoteMode = remoteMode, audioMuted = audioMuted,
-                    onUserForced = { userForced = true; retryToken++ },
-                    onRetry = { retryToken++ },
-                    onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
-                    snapshotTrigger = snapshotTrigger,
-                    isRecording = isRecording,
-                    onRecordSaved = { name ->
-                        coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
-                    },
+                val allChannels = viewModel.channels
+                val count = allChannels.size.coerceAtLeast(1)
+                // Use large virtual page count so the pager wraps: N→1 and 1→N.
+                val TOTAL = count * 400
+                val startPage = remember(selectedChannel, allChannels.size) {
+                    100 * count + allChannels.indexOfFirst { it.id == selectedChannel }.coerceAtLeast(0)
+                }
+                val pagerState = rememberPagerState(
+                    initialPage = startPage,
+                    pageCount = { TOTAL },
                 )
+                // Update selectedChannel when the user settles on a new page
+                LaunchedEffect(pagerState.settledPage) {
+                    allChannels.getOrNull(pagerState.settledPage % count)?.id?.let { selectedChannel = it }
+                }
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    HorizontalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxSize(),
+                        beyondViewportPageCount = 0,
+                    ) { rawPage ->
+                        val ch = allChannels.getOrNull(rawPage % count)
+                        if (ch != null) {
+                            ChannelGridTile(
+                                ch = ch,
+                                isSelected = false,
+                                connectedChannels = viewModel.connectedChannels,
+                                channelStatus = viewModel.channelStatus,
+                                forceTcp = forceTcp,
+                                remoteMode = remoteMode,
+                                useSub = useSub,
+                                audioMuted = audioMuted,
+                                viewModel = viewModel,
+                                onTap = {},
+                                onDoubleTap = {},
+                                onThumbnail = { bmp -> viewModel.setChannelThumbnail(ch.id, bmp) },
+                                snapshotTrigger = if (ch.id == selectedChannel) snapshotTrigger else 0,
+                                isRecording = ch.id == selectedChannel && isRecording,
+                                onRecordSaved = if (ch.id == selectedChannel) {
+                                    { name -> coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") } }
+                                } else null,
+                            )
+                        }
+                    }
+                    // "2 / 4" page indicator
+                    if (count > 1) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 8.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 14.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                "${pagerState.currentPage % count + 1} / $count",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
             } else {
-                LiveChannelGrid(
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    channels = viewModel.channels.take(4),
-                    selectedChannel = selectedChannel,
-                    connectedChannels = viewModel.connectedChannels,
-                    channelStatus = viewModel.channelStatus,
-                    forceTcp = forceTcp,
-                    useSub = useSub,
-                    audioMuted = audioMuted,
-                    viewModel = viewModel,
-                    onChannelTap = { selectedChannel = it },
-                    onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
-                    snapshotTrigger = snapshotTrigger,
-                    isRecording = isRecording,
-                    onRecordSaved = { name ->
-                        coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
-                    },
-                )
+                // 2×2 paged grid: always show 4 channels per page, swipe for more pages
+                val allChannels = viewModel.channels
+                val pageGroups = allChannels.chunked(4).let { if (it.isEmpty()) listOf(emptyList()) else it }
+                val pageCount = pageGroups.size
+                if (pageCount <= 1) {
+                    LiveChannelGrid(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        channels = pageGroups.first(),
+                        selectedChannel = selectedChannel,
+                        connectedChannels = viewModel.connectedChannels,
+                        channelStatus = viewModel.channelStatus,
+                        forceTcp = forceTcp,
+                        remoteMode = remoteMode,
+                        useSub = useSub,
+                        audioMuted = audioMuted,
+                        viewModel = viewModel,
+                        onChannelTap = { selectedChannel = it },
+                        onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
+                        snapshotTrigger = snapshotTrigger,
+                        isRecording = isRecording,
+                        onRecordSaved = { name ->
+                            coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
+                        },
+                    )
+                } else {
+                    // Multiple pages — horizontal swipe between 2×2 pages
+                    val gridPagerState = rememberPagerState(pageCount = { pageCount })
+                    Box(Modifier.fillMaxWidth().weight(1f)) {
+                        HorizontalPager(
+                            state = gridPagerState,
+                            modifier = Modifier.fillMaxSize(),
+                            beyondViewportPageCount = 0,
+                        ) { page ->
+                            LiveChannelGrid(
+                                modifier = Modifier.fillMaxSize(),
+                                channels = pageGroups.getOrElse(page) { emptyList() },
+                                selectedChannel = selectedChannel,
+                                connectedChannels = viewModel.connectedChannels,
+                                channelStatus = viewModel.channelStatus,
+                                forceTcp = forceTcp,
+                                remoteMode = remoteMode,
+                                useSub = useSub,
+                                audioMuted = audioMuted,
+                                viewModel = viewModel,
+                                onChannelTap = { selectedChannel = it },
+                                onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
+                                snapshotTrigger = snapshotTrigger,
+                                isRecording = isRecording,
+                                onRecordSaved = { name ->
+                                    coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
+                                },
+                            )
+                        }
+                        // Page indicator (e.g. "2 / 4")
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 8.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                                .padding(horizontal = 14.dp, vertical = 4.dp),
+                        ) {
+                            Text(
+                                "${gridPagerState.currentPage + 1} / $pageCount",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
             }
 
             // ── Controls bar ─────────────────────────────────────────────────
@@ -306,12 +471,14 @@ fun LiveScreen(
                 audioMuted = audioMuted,
                 singleChannelView = singleChannelView,
                 isRecording = isRecording,
+                channelCount = viewModel.channels.size.coerceAtLeast(1),
                 onQualityToggle = { useSub = !useSub },
-                onGridToggle = { singleChannelView = !singleChannelView },
-                onAudioToggle = { audioMuted = !audioMuted },
-                onSnapshot = { snapshotTrigger++ },
-                onRecord = { isRecording = !isRecording },
-                onFullscreen = { viewMode = ViewMode.SINGLE_FULL; scale = 1f },
+                onSingleChannel = { singleChannelView = true },
+                onMultiChannel  = { singleChannelView = false },
+                onAudioToggle   = { audioMuted = !audioMuted },
+                onSnapshot      = { snapshotTrigger++ },
+                onRecord        = { isRecording = !isRecording },
+                onFullscreen    = { viewMode = ViewMode.FULL },
             )
 
             HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
@@ -326,6 +493,30 @@ fun LiveScreen(
                     onStop = { viewModel.ptzStop(selectedChannel) },
                     onViewPlayback = onNavigateToPlayback,
                 )
+            }
+
+            // ── Tab-root bottom actions (Talk / Presets / More) ──────────────
+            if (isTabRoot) {
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f), thickness = 0.5.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF0D0D0D))
+                        .padding(vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LiveNavItem(Icons.Default.Alarm, "Events", {})
+                    MicHoldButton(
+                        host = talkHost,
+                        port = talkPort,
+                        username = viewModel.credentials?.username ?: "admin",
+                        password = viewModel.credentials?.password ?: "",
+                        channel = selectedChannel,
+                    )
+                    LiveNavItem(Icons.Default.Star, "Presets", { showPresets = !showPresets }, selected = showPresets)
+                    LiveNavItem(Icons.Default.MoreHoriz, "More", { showMoreSheet = true })
+                }
             }
 
             SnackbarHost(
@@ -347,8 +538,21 @@ fun LiveScreen(
     }
     if (showMoreSheet) {
         MoreFeaturesSheet(
-            onDismiss = { showMoreSheet = false },
-            onSettings = { showMoreSheet = false; onNavigateToSettings(selectedChannel) },
+            onDismiss       = { showMoreSheet = false },
+            onSettings      = { showMoreSheet = false; onNavigateToSettings(selectedChannel) },
+            onAutoCruise    = {
+                if (viewModel.autoCruiseActive) viewModel.stopAutoCruise()
+                else viewModel.startAutoCruise(selectedChannel)
+            },
+            autoCruiseActive = viewModel.autoCruiseActive,
+            onPtzCalibrate  = { viewModel.ptzCalibrate(selectedChannel) },
+            onNightVision   = { showMoreSheet = false; onOpenNightVision(selectedChannel) },
+            onSiren         = {
+                if (viewModel.cameraAlarmActive) viewModel.stopCameraAlarm(selectedChannel)
+                else viewModel.triggerCameraAlarm(selectedChannel)
+            },
+            sirenActive     = sirenActive,
+            onPhotos        = { showMoreSheet = false; onOpenPhotos() },
         )
     }
     viewModel.ptzPopupMessage?.let { msg ->
@@ -398,10 +602,16 @@ private fun ChannelContent(
             rtsp == null -> {
                 if (fetchExhausted) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Playback Error", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (remoteMode) "P2P Unavailable" else "Playback Error",
+                            color = Color.White, fontWeight = FontWeight.SemiBold,
+                        )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            "Network error. Try again later.",
+                            if (remoteMode)
+                                "Could not open P2P tunnel.\nCheck NVR status or try again."
+                            else
+                                "Network error. Try again later.",
                             color = Color.White.copy(alpha = 0.75f),
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center,
@@ -425,7 +635,8 @@ private fun ChannelContent(
             }
             else -> key(rtsp, forceTcp) {
                 VlcRtspPlayer(
-                    rtspUrl = rtsp, forceTcp = forceTcp, audioMuted = audioMuted,
+                    rtspUrl = rtsp, forceTcp = forceTcp, isRemote = remoteMode,
+                    audioMuted = audioMuted,
                     onThumbnail = onThumbnail,
                     snapshotTrigger = snapshotTrigger,
                     isRecording = isRecording,
@@ -446,6 +657,7 @@ private fun LiveChannelGrid(
     connectedChannels: Set<Int>?,
     channelStatus: Map<Int, String>,
     forceTcp: Boolean,
+    remoteMode: Boolean = false,
     useSub: Boolean,
     audioMuted: Boolean,
     viewModel: NvrViewModel,
@@ -484,6 +696,7 @@ private fun LiveChannelGrid(
                             connectedChannels = connectedChannels,
                             channelStatus = channelStatus,
                             forceTcp = forceTcp,
+                            remoteMode = remoteMode,
                             useSub = useSub,
                             audioMuted = audioMuted,
                             viewModel = viewModel,
@@ -525,8 +738,9 @@ private fun LiveChannelGrid(
             }
         }
 
-        // ── 2×2 grid ──────────────────────────────────────────────────────────
-        val rows = channels.chunked(2)
+        // ── adaptive grid: 2 cols for ≤4 ch, 4 cols for 5-16 ch ────────────────
+        val cols = if (channels.size <= 4) 2 else 4
+        val rows = channels.chunked(cols)
         Column(
             modifier = Modifier.fillMaxSize().background(Color.Black),
             verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -545,6 +759,7 @@ private fun LiveChannelGrid(
                                     connectedChannels = connectedChannels,
                                     channelStatus = channelStatus,
                                     forceTcp = forceTcp,
+                                    remoteMode = remoteMode,
                                     useSub = useSub,
                                     audioMuted = true,
                                     viewModel = viewModel,
@@ -562,7 +777,7 @@ private fun LiveChannelGrid(
                             }
                         }
                     }
-                    if (row.size < 2) {
+                    repeat(cols - row.size) {
                         Box(Modifier.weight(1f).fillMaxHeight().background(Color(0xFF111113)))
                     }
                 }
@@ -585,6 +800,7 @@ private fun ChannelGridTile(
     connectedChannels: Set<Int>?,
     channelStatus: Map<Int, String>,
     forceTcp: Boolean,
+    remoteMode: Boolean = false,
     useSub: Boolean,
     audioMuted: Boolean,
     viewModel: NvrViewModel,
@@ -603,17 +819,29 @@ private fun ChannelGridTile(
 
     var rtsp by remember(ch.id, ch.ipAddr, useSub) { mutableStateOf<String?>(null) }
 
-    if (assigned && !knownOffline) {
-        LaunchedEffect(ch.id, ch.ipAddr, useSub) {
-            rtsp = null
-            val stream = if (useSub) 1 else 0
-            var attempts = 0
-            while (rtsp == null && attempts < 3) {
-                attempts++
-                rtsp = viewModel.ensureChannelStreamUrl(ch.id, stream = stream)
-                if (rtsp == null && attempts < 3) delay(1_500L * attempts)
-            }
+    LaunchedEffect(ch.id, ch.ipAddr, useSub) {
+        rtsp = null
+        if (!assigned) return@LaunchedEffect
+        // Wait reactively for the channel to be online (or status unknown = reachable).
+        // Using snapshotFlow avoids restarting this effect on every status poll,
+        // which would interrupt a playing stream every 8-20 seconds.
+        snapshotFlow { !viewModel.isChannelOffline(ch.id) }
+            .first { it }
+        val stream = if (useSub) 1 else 0
+        var attempts = 0
+        while (rtsp == null && attempts < 3 && isActive) {
+            attempts++
+            rtsp = viewModel.ensureChannelStreamUrl(ch.id, stream = stream)
+            if (rtsp == null && attempts < 3) delay(1_500L * attempts)
         }
+    }
+
+    // When the NVR definitively marks this channel offline after we already
+    // started VLC, drop the URL so the "Offline" placeholder shows immediately
+    // rather than waiting for the VLC watchdog to time out.
+    LaunchedEffect(ch.id) {
+        snapshotFlow { viewModel.isChannelOffline(ch.id) }
+            .collect { isOffline -> if (isOffline) rtsp = null }
     }
 
     Box(
@@ -633,11 +861,13 @@ private fun ChannelGridTile(
                 VlcRtspPlayer(
                     rtspUrl = url,
                     forceTcp = forceTcp,
+                    isRemote = remoteMode,
                     audioMuted = audioMuted,
                     onThumbnail = onThumbnail,
                     snapshotTrigger = snapshotTrigger,
                     isRecording = isRecording,
                     onRecordSaved = onRecordSaved,
+                    startDelayMs = ch.id.toLong() * 600L,
                 )
             }
         } else {
@@ -716,13 +946,20 @@ private fun VideoControlsBar(
     audioMuted: Boolean,
     singleChannelView: Boolean,
     isRecording: Boolean,
+    channelCount: Int,
     onQualityToggle: () -> Unit,
-    onGridToggle: () -> Unit,
+    onSingleChannel: () -> Unit,
+    onMultiChannel: () -> Unit,
     onAudioToggle: () -> Unit,
     onSnapshot: () -> Unit,
     onRecord: () -> Unit,
     onFullscreen: () -> Unit,
 ) {
+    var showGridMenu by remember { mutableStateOf(false) }
+    val gridLabel = if (singleChannelView) "1" else channelCount.toString()
+    val gridCols  = 2  // always 2×2 grid per page
+    val pageCount = (channelCount + 3) / 4
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -731,7 +968,7 @@ private fun VideoControlsBar(
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Quality chip
+        // Quality chip (SD / HD)
         Surface(
             onClick = onQualityToggle,
             shape = RoundedCornerShape(6.dp),
@@ -746,12 +983,76 @@ private fun VideoControlsBar(
                 color = Color.White,
             )
         }
-        // Toggle 1-channel / 4-channel
-        ControlIcon(
-            if (singleChannelView) Icons.Default.GridView else Icons.Default.CropLandscape,
-            if (singleChannelView) "4-channel" else "1-channel",
-            onGridToggle,
-        )
+
+        // Grid layout picker — replaces the old "4" / "1" chips
+        Box {
+            Surface(
+                onClick = { showGridMenu = !showGridMenu },
+                shape = RoundedCornerShape(6.dp),
+                color = if (showGridMenu) Color.White.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.12f),
+                modifier = Modifier.padding(4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        Icons.Default.GridView,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = Color.White,
+                    )
+                    Text(
+                        gridLabel,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                    )
+                }
+            }
+            DropdownMenu(
+                expanded = showGridMenu,
+                onDismissRequest = { showGridMenu = false },
+            ) {
+                // ── 2×2 paged grid option ─────────────────────────────────
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            GridLayoutThumbnail(cols = 2, rows = 2, selected = !singleChannelView)
+                            Column {
+                                Text("2×2 Grid", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                Text(
+                                    if (pageCount > 1) "$pageCount pages · 4 channels each"
+                                    else "$channelCount channels",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    },
+                    onClick = { onMultiChannel(); showGridMenu = false },
+                )
+                // ── Single-channel pager option ────────────────────────────
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            GridLayoutThumbnail(cols = 1, rows = 1, selected = singleChannelView)
+                            Column {
+                                Text("Single Channel", fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                Text(
+                                    "Swipe to switch",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    },
+                    onClick = { onSingleChannel(); showGridMenu = false },
+                )
+            }
+        }
+
         // Audio
         ControlIcon(
             if (audioMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
@@ -767,8 +1068,41 @@ private fun VideoControlsBar(
             onRecord,
             tint = if (isRecording) Color.Red else Color.White.copy(alpha = 0.6f),
         )
-        // Single fullscreen
+        // Fullscreen shortcut (direct tap, same as picker option)
         ControlIcon(Icons.Default.Fullscreen, "Fullscreen", onFullscreen)
+    }
+}
+
+@Composable
+private fun GridLayoutThumbnail(cols: Int, rows: Int, selected: Boolean) {
+    val color = if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.4f)
+    val fillColor = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.08f)
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .border(1.5.dp, color, RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp))
+            .background(fillColor),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            repeat(rows) {
+                Row(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    repeat(cols) {
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxHeight()
+                                .background(color.copy(alpha = 0.6f), RoundedCornerShape(2.dp)),
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1012,6 +1346,8 @@ private fun PresetsSheet(
 private fun LiveBottomBar(
     selectedChannel: Int,
     creds: NvrCredentials?,
+    talkHost: String = creds?.host ?: "",
+    talkPort: Int = 10000,
     onDevice: () -> Unit,
     onEvents: () -> Unit,
     showPresets: Boolean,
@@ -1033,8 +1369,8 @@ private fun LiveBottomBar(
             LiveNavItem(Icons.Default.Videocam, "Device", onDevice)
             LiveNavItem(Icons.Default.Alarm, "Events", onEvents)
             MicHoldButton(
-                host = creds?.host ?: "",
-                port = 10000,
+                host = talkHost,
+                port = talkPort,
                 username = creds?.username ?: "admin",
                 password = creds?.password ?: "",
                 channel = selectedChannel,
@@ -1098,9 +1434,13 @@ private fun MicHoldButton(
         }
     }
 
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
     Box(
         modifier = Modifier
-            .size(48.dp)
+            .size(40.dp)
             .clip(CircleShape)
             .background(if (pressed) Color(0xFF1565C0) else Color(0xFF1E88E5))
             .pointerInput(host, channel) {
@@ -1168,8 +1508,14 @@ private fun MicHoldButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(Icons.Default.Mic, "Talk", tint = Color.White, modifier = Modifier.size(22.dp))
+        Icon(Icons.Default.Mic, "Talk", tint = Color.White, modifier = Modifier.size(20.dp))
     }
+    Text(
+        if (pressed) "Talking…" else "Talk",
+        fontSize = 10.sp,
+        color = if (pressed) Color(0xFF90CAF9) else LocalContentColor.current,
+    )
+    } // Column
 }
 
 // ─── More features sheet ─────────────────────────────────────────────────────
@@ -1179,6 +1525,13 @@ private fun MicHoldButton(
 private fun MoreFeaturesSheet(
     onDismiss: () -> Unit,
     onSettings: () -> Unit,
+    onAutoCruise: () -> Unit = {},
+    autoCruiseActive: Boolean = false,
+    onPtzCalibrate: () -> Unit = {},
+    onNightVision: () -> Unit = {},
+    onSiren: () -> Unit = {},
+    sirenActive: Boolean = false,
+    onPhotos: () -> Unit = {},
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Row(
@@ -1194,13 +1547,19 @@ private fun MoreFeaturesSheet(
             }
         }
 
+        data class Feature(
+            val icon: ImageVector,
+            val label: String,
+            val active: Boolean = false,
+            val onClick: () -> Unit,
+        )
         val features = listOf(
-            Pair(Icons.Default.Autorenew,           "Auto Cruise"),
-            Pair(Icons.Default.Adjust,              "PTZ Calibration"),
-            Pair(Icons.Default.NightsStay,          "Night Vision"),
-            Pair(Icons.Default.NotificationsActive, "Siren"),
-            Pair(Icons.Default.Image,               "Photos"),
-            Pair(Icons.Default.Share,               "Device Sharing"),
+            Feature(Icons.Default.Autorenew,           "Auto Cruise",     active = autoCruiseActive, onClick = onAutoCruise),
+            Feature(Icons.Default.Adjust,              "PTZ Calibration", onClick = onPtzCalibrate),
+            Feature(Icons.Default.NightsStay,          "Night Vision",    onClick = onNightVision),
+            Feature(Icons.Default.NotificationsActive, "Siren",           active = sirenActive,      onClick = onSiren),
+            Feature(Icons.Default.Image,               "Photos",          onClick = onPhotos),
+            Feature(Icons.Default.Share,               "Device Sharing",  onClick = {}),
         )
 
         features.chunked(4).forEach { rowItems ->
@@ -1208,13 +1567,10 @@ private fun MoreFeaturesSheet(
                 Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.Start,
             ) {
-                rowItems.forEach { (icon, label) ->
-                    FeatureItem(icon, label, Modifier.weight(1f))
+                rowItems.forEach { feat ->
+                    FeatureItem(feat.icon, feat.label, feat.active, Modifier.weight(1f), feat.onClick)
                 }
-                // Fill remaining columns
-                repeat(4 - rowItems.size) {
-                    Spacer(Modifier.weight(1f))
-                }
+                repeat(4 - rowItems.size) { Spacer(Modifier.weight(1f)) }
             }
         }
         Spacer(Modifier.height(24.dp))
@@ -1222,24 +1578,39 @@ private fun MoreFeaturesSheet(
 }
 
 @Composable
-private fun FeatureItem(icon: ImageVector, label: String, modifier: Modifier) {
+private fun FeatureItem(
+    icon: ImageVector,
+    label: String,
+    active: Boolean = false,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    val activeColor = MaterialTheme.colorScheme.primary
+    val bgColor = if (active) activeColor.copy(alpha = 0.2f) else MaterialTheme.colorScheme.surfaceVariant
+    val iconTint = if (active) activeColor else LocalContentColor.current
     Column(
         modifier = modifier
-            .clickable { }
+            .clickable(onClick = onClick)
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Surface(
             shape = CircleShape,
-            color = MaterialTheme.colorScheme.surfaceVariant,
+            color = bgColor,
             modifier = Modifier.size(52.dp),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(icon, null, modifier = Modifier.size(24.dp))
+                Icon(icon, null, modifier = Modifier.size(24.dp), tint = iconTint)
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text(label, fontSize = 11.sp, textAlign = TextAlign.Center, maxLines = 2)
+        Text(
+            label,
+            fontSize = 11.sp,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            color = if (active) activeColor else LocalContentColor.current,
+        )
     }
 }
 
@@ -1277,33 +1648,43 @@ private fun PlayerPlaceholder(
 private fun VlcRtspPlayer(
     rtspUrl: String,
     forceTcp: Boolean,
+    isRemote: Boolean = false,
     audioMuted: Boolean = false,
     onThumbnail: ((Bitmap) -> Unit)? = null,
     snapshotTrigger: Int = 0,
     isRecording: Boolean = false,
     onRecordSaved: ((String) -> Unit)? = null,
+    startDelayMs: Long = 0,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    var retryEpoch by remember(rtspUrl, forceTcp) { mutableIntStateOf(0) }
-    var state by remember(rtspUrl, forceTcp, retryEpoch) { mutableStateOf("Connecting…") }
-    var error by remember(rtspUrl, forceTcp, retryEpoch) { mutableStateOf<String?>(null) }
-    var playing by remember(rtspUrl, forceTcp, retryEpoch) { mutableStateOf(false) }
+    var retryEpoch  by remember(rtspUrl, forceTcp, isRemote) { mutableIntStateOf(0) }
+    // autoRetries persists across retryEpoch increments so we know how many
+    // silent retries we've already done for this URL/mode combination.
+    var autoRetries by remember(rtspUrl, forceTcp, isRemote) { mutableIntStateOf(0) }
+    var state   by remember(rtspUrl, forceTcp, isRemote, retryEpoch) { mutableStateOf("Connecting…") }
+    var error   by remember(rtspUrl, forceTcp, isRemote, retryEpoch) { mutableStateOf<String?>(null) }
+    var playing by remember(rtspUrl, forceTcp, isRemote, retryEpoch) { mutableStateOf(false) }
 
-    val libVlc = remember(forceTcp, retryEpoch) {
-        LibVLC(context, arrayListOf(
-            "--no-drop-late-frames",
-            "--no-skip-frames",
-            "--rtsp-frame-buffer-size=1100000",
-            "--network-caching=300",
-            "--live-caching=300",
-            "--clock-jitter=0",
-            "--clock-synchro=0",
-            if (forceTcp) "--rtsp-tcp" else "--no-rtsp-tcp",
-            if (com.arcisai.nvr.BuildConfig.DEBUG) "-vvv" else "-q",
-        ))
+    // Shared singleton — LibVLC native init is ~200-500 ms and must never be called
+    // multiple times simultaneously on the main thread (causes ANR in a 4-channel grid).
+    val libVlc = remember { VlcSingleton.get(context) }
+    val player = remember { MediaPlayer(libVlc) }
+    val videoLayout = remember { VLCVideoLayout(context) }
+    // Holds the file prefix used when recording started, so stop can locate the file
+    val recState = remember { object { var prefix: String? = null } }
+
+    // ── UI overlay states ────────────────────────────────────────────────
+    val flashAlpha        = remember { Animatable(0f) }
+    var photoSaved        by remember { mutableStateOf(false) }
+    var recordSaved       by remember { mutableStateOf(false) }
+    var recordSavedLabel  by remember { mutableStateOf("") }
+    var recordingElapsed  by remember { mutableIntStateOf(0) }
+
+    // Recording elapsed-seconds counter
+    LaunchedEffect(isRecording) {
+        if (!isRecording) { recordingElapsed = 0; return@LaunchedEffect }
+        while (isActive) { delay(1_000); recordingElapsed++ }
     }
-    val player = remember(libVlc) { MediaPlayer(libVlc) }
-    val videoLayout = remember(libVlc) { VLCVideoLayout(context) }
 
     // Apply mute state whenever it changes
     LaunchedEffect(audioMuted) {
@@ -1334,9 +1715,11 @@ private fun VlcRtspPlayer(
                 context.contentResolver.openOutputStream(u)?.use { out ->
                     bmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
                 }
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    Toast.makeText(context, "Snapshot saved", Toast.LENGTH_SHORT).show()
-                }
+                // Flash + photo-saved overlay (replaces Toast)
+                launch { flashAlpha.snapTo(0.85f); flashAlpha.animateTo(0f, tween(220)) }
+                photoSaved = true
+                delay(2_500)
+                photoSaved = false
             }
         } else {
             val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
@@ -1344,43 +1727,55 @@ private fun VlcRtspPlayer(
             val file = File(dir, name)
             file.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
             android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), null, null)
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                Toast.makeText(context, "Snapshot saved", Toast.LENGTH_SHORT).show()
-            }
+            launch { flashAlpha.snapTo(0.85f); flashAlpha.animateTo(0f, tween(220)) }
+            photoSaved = true
+            delay(2_500)
+            photoSaved = false
         }
     }
 
-    // Recording: start/stop VLC file output
+    // Recording: start/stop VLC file output.
     LaunchedEffect(isRecording) {
         if (isRecording) {
-            val dir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                ?: context.cacheDir
-            dir.mkdirs()
-            player.record(dir.absolutePath)
+            // VLC record() expects a DIRECTORY path — create it explicitly
+            val base = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.cacheDir
+            val recDir = java.io.File(base, "ArcisNVR").also { it.mkdirs() }
+            recState.prefix = recDir.absolutePath
+            player.record(recDir.absolutePath)
         } else {
-            // Stop recording — pass null to end it
-            val dir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                ?: context.cacheDir
-            // Find newest file created in that dir
-            val before = dir.listFiles()?.map { it.name to it.lastModified() }?.toMap() ?: emptyMap()
+            val dirPath = recState.prefix
+            recState.prefix = null
+            val dir = if (dirPath != null) java.io.File(dirPath)
+                      else java.io.File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.cacheDir, "ArcisNVR")
             player.record(null)
-            kotlinx.coroutines.delay(500)
+            // Give VLC time to flush and close the file before we read it
+            kotlinx.coroutines.delay(3_000)
+            val videoExts = listOf("ts", "mp4", "mkv", "avi", "m4v")
+            // Find the most recently modified video file that VLC saved to the directory
             val newest = dir.listFiles()
-                ?.filter { !before.containsKey(it.name) || it.lastModified() > (before[it.name] ?: 0L) }
+                ?.filter { f -> f.extension.lowercase() in videoExts && f.length() > 0 }
                 ?.maxByOrNull { it.lastModified() }
             if (newest != null) {
-                // Copy into MediaStore Movies
+                val mimeType = when (newest.extension.lowercase()) {
+                    "mp4" -> "video/mp4"
+                    "mkv" -> "video/x-matroska"
+                    else  -> "video/mp2ts"
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     val values = ContentValues().apply {
                         put(MediaStore.Video.Media.DISPLAY_NAME, newest.name)
-                        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                        put(MediaStore.Video.Media.MIME_TYPE, mimeType)
                         put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ArcisNVR")
+                        put(MediaStore.Video.Media.IS_PENDING, 1)
                     }
                     val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
                     uri?.let { u ->
                         context.contentResolver.openOutputStream(u)?.use { out ->
                             newest.inputStream().use { it.copyTo(out) }
                         }
+                        values.clear()
+                        values.put(MediaStore.Video.Media.IS_PENDING, 0)
+                        context.contentResolver.update(u, values, null, null)
                         newest.delete()
                     }
                 } else {
@@ -1392,37 +1787,68 @@ private fun VlcRtspPlayer(
                     android.media.MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), null, null)
                 }
                 onRecordSaved?.invoke(newest.name)
+                recordSavedLabel = newest.name
+                recordSaved = true
+                delay(3_000)
+                recordSaved = false
             }
         }
     }
 
-    // Capture a thumbnail every 5s while playing, so the Device tab grid
-    // can show the last-seen frame for this channel.
+    // Capture a thumbnail every 15s while playing for the Device tab grid.
+    // PixelCopy is a GPU readback — doing it too frequently causes micro-stutters.
+    // We scale to ≤320 px wide so the bitmap is cheap to store and display.
     if (onThumbnail != null) {
         LaunchedEffect(playing, rtspUrl) {
             if (!playing) return@LaunchedEffect
             while (isActive) {
-                delay(5_000)
+                delay(15_000)
                 val bmp = suspendCancellableCoroutine<Bitmap?> { cont ->
                     val sv = findSurfaceView(videoLayout)
                     if (sv == null || sv.width <= 0 || sv.height <= 0) {
                         cont.resume(null); return@suspendCancellableCoroutine
                     }
-                    val b = Bitmap.createBitmap(sv.width, sv.height, Bitmap.Config.ARGB_8888)
+                    val b = Bitmap.createBitmap(sv.width, sv.height, Bitmap.Config.RGB_565)
                     PixelCopy.request(sv, b, { result ->
                         if (cont.isActive) cont.resume(if (result == PixelCopy.SUCCESS) b else null)
                     }, Handler(Looper.getMainLooper()))
+                } ?: continue
+                // Scale down off the main thread to avoid blocking the compositor
+                val scaled = withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    val maxW = 320
+                    if (bmp.width <= maxW) bmp
+                    else {
+                        val scale = maxW.toFloat() / bmp.width
+                        val w = maxW; val h = (bmp.height * scale).toInt()
+                        Bitmap.createScaledBitmap(bmp, w, h, false).also { if (it !== bmp) bmp.recycle() }
+                    }
                 }
-                bmp?.let { onThumbnail(it) }
+                onThumbnail(scaled)
             }
         }
     }
 
-    DisposableEffect(rtspUrl, forceTcp, retryEpoch) {
+    // Attach views once; tear down when the composable leaves composition entirely.
+    DisposableEffect(Unit) {
+        player.attachViews(videoLayout, null, false, false)
+        onDispose {
+            player.stop()
+            player.detachViews()
+            player.setEventListener(null)
+            player.release()
+            // libVlc is a process-wide singleton — never release it per-player
+        }
+    }
+
+    // Event listener remounts on retry/URL change so it captures the fresh state objects.
+    DisposableEffect(rtspUrl, forceTcp, isRemote, retryEpoch) {
         val listener = MediaPlayer.EventListener { event ->
             when (event.type) {
                 MediaPlayer.Event.Opening          -> state = "Opening…"
-                MediaPlayer.Event.Buffering        -> if (!playing) state = "Buffering ${event.buffering.toInt()}%"
+                MediaPlayer.Event.Buffering        -> if (!playing) {
+                    val pct = event.buffering.toInt()
+                    state = if (pct == 0) "Connecting…" else "Buffering $pct%"
+                }
                 MediaPlayer.Event.Playing          -> { playing = true; state = "Playing" }
                 MediaPlayer.Event.Paused           -> state = "Paused"
                 MediaPlayer.Event.Stopped          -> state = "Stopped"
@@ -1431,46 +1857,65 @@ private fun VlcRtspPlayer(
             }
         }
         player.setEventListener(listener)
-        player.attachViews(videoLayout, null, false, false)
+        onDispose { player.setEventListener(null) }
+    }
 
-        val media = Media(libVlc, android.net.Uri.parse(rtspUrl))
-        media.setHWDecoderEnabled(true, false)
-        media.addOption(":network-caching=300")
-        media.addOption(":live-caching=300")
-        if (forceTcp) media.addOption(":rtsp-tcp")
-        player.media = media
-        media.release()
-        player.play()
-
-        onDispose {
+    // Media creation + player.play() moved to IO thread so the composition thread
+    // is never blocked. startDelayMs staggers grid channels to avoid concurrent
+    // native decoder init (which caused the 4-channel ANR).
+    LaunchedEffect(rtspUrl, forceTcp, isRemote, retryEpoch) {
+        if (startDelayMs > 0L) kotlinx.coroutines.delay(startDelayMs)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             player.stop()
-            player.detachViews()
-            player.setEventListener(null)
-            player.release()
-            libVlc.release()
+            val media = Media(libVlc, android.net.Uri.parse(rtspUrl))
+            media.setHWDecoderEnabled(true, false)
+            if (forceTcp) media.addOption(":rtsp-tcp")
+            player.media = media
+            media.release()
+            player.play()
         }
     }
 
-    // Watchdog: surface Retry after 12s of no playback
-    LaunchedEffect(rtspUrl, forceTcp, retryEpoch) {
-        delay(12_000)
-        if (!playing && error == null)
-            error = "Stream timed out. Try switching SD / HD."
+    // Watchdog: auto-retry silently up to 3 times, then surface the error.
+    // P2P streams can take 20-30s to start — the user should never have to
+    // tap Retry unless all 3 attempts fail.
+    LaunchedEffect(rtspUrl, forceTcp, isRemote, retryEpoch) {
+        delay(if (isRemote) 22_000L else 7_000L)
+        if (!playing && error == null) {
+            if (autoRetries < 3) {
+                autoRetries++   // persists across retryEpoch — resets only on URL change
+                retryEpoch++    // triggers a new media-setup LaunchedEffect
+            } else {
+                error = if (isRemote)
+                    "Stream timed out. Camera may be offline or the relay IPs need updating."
+                else
+                    "Stream unavailable. Check SD / HD or your connection."
+            }
+        }
     }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         AndroidView(modifier = Modifier.fillMaxSize(), factory = { videoLayout })
+
+        // ── Screenshot flash ──────────────────────────────────────────────
+        if (flashAlpha.value > 0f) {
+            Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = flashAlpha.value)))
+        }
+
         if (!playing) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (error == null) {
                     CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(10.dp))
-                    Text(state, color = Color.White)
+                    Text(
+                        if (autoRetries > 0) "Reconnecting…" else state,
+                        color = Color.White,
+                    )
                 } else {
-                    Text("Playback Error", color = Color.White, fontWeight = FontWeight.SemiBold)
+                    Text("Stream unavailable", color = Color.White, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        error ?: "Try again.",
+                        "Check your connection or try HD/SD.",
                         color = Color.White.copy(alpha = 0.75f),
                         fontSize = 12.sp,
                         textAlign = TextAlign.Center,
@@ -1478,9 +1923,91 @@ private fun VlcRtspPlayer(
                     )
                     Spacer(Modifier.height(12.dp))
                     Button(
-                        onClick = { retryEpoch++ },
+                        onClick = { autoRetries = 0; retryEpoch++ },
                         shape = RoundedCornerShape(50),
                     ) { Text("Retry") }
+                }
+            }
+        }
+
+        // ── Recording timer badge (top-right) ────────────────────────────
+        if (isRecording) {
+            val infinite = rememberInfiniteTransition(label = "rec")
+            val dotAlpha by infinite.animateFloat(
+                initialValue    = 0.25f,
+                targetValue     = 1f,
+                animationSpec   = infiniteRepeatable(tween(600), RepeatMode.Reverse),
+                label           = "dot",
+            )
+            Surface(
+                shape  = RoundedCornerShape(4.dp),
+                color  = Color.Black.copy(alpha = 0.60f),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(Color.Red.copy(alpha = dotAlpha), CircleShape)
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    val m = recordingElapsed / 60
+                    val s = recordingElapsed % 60
+                    Text("%02d:%02d".format(m, s), color = Color.White, fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+
+        // ── Photo saved toast ─────────────────────────────────────────────
+        AnimatedVisibility(
+            visible  = photoSaved,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 20.dp),
+            enter    = slideInVertically { it / 2 } + fadeIn(),
+            exit     = slideOutVertically { it / 2 } + fadeOut(),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = Color.Black.copy(alpha = 0.75f),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.CameraAlt, null,
+                        tint = Color.White, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Photo saved", color = Color.White, fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+
+        // ── Recording saved toast ─────────────────────────────────────────
+        AnimatedVisibility(
+            visible  = recordSaved,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 20.dp),
+            enter    = slideInVertically { it / 2 } + fadeIn(),
+            exit     = slideOutVertically { it / 2 } + fadeOut(),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = Color.Black.copy(alpha = 0.75f),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.CheckCircle, null,
+                        tint = Color(0xFF66BB6A), modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Recording saved", color = Color.White, fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium)
                 }
             }
         }

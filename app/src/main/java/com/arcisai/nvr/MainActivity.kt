@@ -18,17 +18,17 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arcisai.nvr.ui.Tab
+import com.arcisai.nvr.ui.screens.AboutChannelScreen
 import com.arcisai.nvr.ui.screens.AboutDeviceScreen
 import com.arcisai.nvr.ui.screens.ChannelSettingsScreen
 import com.arcisai.nvr.ui.screens.DeviceInfoScreen
@@ -37,11 +37,14 @@ import com.arcisai.nvr.ui.screens.EncodingScreen
 import com.arcisai.nvr.ui.screens.GeneralScreen
 import com.arcisai.nvr.ui.screens.ImageColorScreen
 import com.arcisai.nvr.ui.screens.LiveScreen
+import com.arcisai.nvr.ui.screens.MediaGalleryScreen
 import com.arcisai.nvr.ui.screens.LiveTabScreen
 import com.arcisai.nvr.ui.screens.LogsScreen
 import com.arcisai.nvr.ui.screens.LoginScreen
 import com.arcisai.nvr.ui.screens.MaintenanceScreen
 import com.arcisai.nvr.ui.screens.ManageScreen
+import com.arcisai.nvr.ui.screens.MeScreen
+import com.arcisai.nvr.ui.screens.MotionDetectionScreen
 import com.arcisai.nvr.ui.screens.MyNvrsScreen
 import com.arcisai.nvr.ui.screens.NetworkScreen
 import com.arcisai.nvr.ui.screens.OsdScreen
@@ -67,35 +70,39 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background) {
                     val rootNav = rememberNavController()
-                    NavHost(navController = rootNav, startDestination = "loading") {
-                        // Loading: shown briefly while ViewModel checks saved session.
-                        composable("loading") {
-                            Box(Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
-                                CircularProgressIndicator()
-                            }
+                    NavHost(navController = rootNav, startDestination = "login") {
+                        composable("login") {
                             val dest = viewModel.startDestination
                             LaunchedEffect(dest) {
-                                if (dest != null) {
+                                if (dest != null && dest != "login") {
                                     rootNav.navigate(dest) {
-                                        popUpTo("loading") { inclusive = true }
+                                        popUpTo("login") { inclusive = true }
                                     }
                                 }
                             }
-                        }
-                        composable("login") {
-                            LoginScreen(
-                                vm = viewModel,
-                                onLanConnected = {
-                                    rootNav.navigate("main") {
-                                        popUpTo("login") { inclusive = true }
-                                    }
-                                },
-                                onCloudAuthenticated = {
-                                    rootNav.navigate("my_nvrs") {
-                                        popUpTo("login") { inclusive = true }
-                                    }
-                                },
-                            )
+                            if (dest == null) {
+                                // Session-restore check in flight — don't flash the login form.
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    CircularProgressIndicator()
+                                }
+                            } else {
+                                LoginScreen(
+                                    vm = viewModel,
+                                    onLanConnected = {
+                                        rootNav.navigate("main") {
+                                            popUpTo("login") { inclusive = true }
+                                        }
+                                    },
+                                    onCloudAuthenticated = {
+                                        rootNav.navigate("my_nvrs") {
+                                            popUpTo("login") { inclusive = true }
+                                        }
+                                    },
+                                )
+                            }
                         }
                         composable("my_nvrs") {
                             MyNvrsScreen(
@@ -151,7 +158,10 @@ private fun MainScaffold(
     // LiveScreen provides its own bottom navigation bar.
     val showBottomBar = backStack?.destination?.route?.let { r ->
         !r.startsWith("live/") && r != "nvr-settings" &&
-        !r.startsWith("channel-settings") && r != "about-device"
+        !r.startsWith("channel-settings") && r != "about-device" &&
+        !r.startsWith("channel-night") && !r.startsWith("channel-osd/") && !r.startsWith("settings/") &&
+        !r.startsWith("channel-color/") && !r.startsWith("channel-encode/") &&
+        !r.startsWith("channel-about/") && !r.startsWith("channel-motion/") && r != "photos"
     } ?: true
 
     Scaffold(
@@ -164,11 +174,11 @@ private fun MainScaffold(
         ) {
             composable(Tab.LIVE.route) {
                 LiveTabScreen(
-                    vm,
-                    onChannelTap = { ch -> nav.navigate("live/$ch") },
+                    vm             = vm,
+                    onChannelTap   = { ch -> nav.navigate("live/$ch") },
                     onOpenSettings = { nav.navigate("nvr-settings") },
                     onOpenPlayback = { nav.navigate(Tab.PLAYBACK.route) },
-                    onDisconnect = onLogout,
+                    onDisconnect   = onLogout,
                 )
             }
             composable("live/{ch}") { entry ->
@@ -178,14 +188,21 @@ private fun MainScaffold(
                     channelId = ch,
                     onBack = { nav.popBackStack() },
                     onNavigateToPlayback = {
-                        // Keep live/{ch} in the back stack so Playback can
-                        // offer a back-arrow that returns to the PTZ screen.
                         nav.navigate(Tab.PLAYBACK.route)
                     },
                     onNavigateToSettings = { selectedCh ->
                         nav.navigate("channel-settings/$selectedCh")
                     },
+                    onOpenNightVision = { nightCh ->
+                        nav.navigate("channel-night/$nightCh")
+                    },
+                    onOpenPhotos = {
+                        nav.navigate("photos")
+                    },
                 )
+            }
+            composable("photos") {
+                MediaGalleryScreen(onBack = { nav.popBackStack() })
             }
             composable(Tab.PLAYBACK.route) {
                 val prevRoute = nav.previousBackStackEntry?.destination?.route
@@ -193,13 +210,22 @@ private fun MainScaffold(
                 PlaybackTabScreen(
                     vm = vm,
                     onBack = if (fromLive) ({ nav.popBackStack() }) else null,
+                    onViewLive = {
+                        // Open the live streaming view directly (same page reached by
+                        // tapping the Device-tab thumbnail), not the Device tab itself.
+                        val ch = vm.selectedLiveChannel
+                        nav.navigate("live/$ch") {
+                            popUpTo(nav.graph.findStartDestination().id) { inclusive = false }
+                            launchSingleTop = true
+                        }
+                    },
                 )
             }
             composable(Tab.MANAGE.route)   { ManageScreen(vm) }
             // Me / profile tab – content to be defined later
             composable(Tab.SETTINGS.route) {
                 MeScreen(
-                    email = vm.accountEmail,
+                    vm = vm,
                     onLogout = onLogout,
                     onOpenNvrSettings = { nav.navigate("nvr-settings") },
                 )
@@ -235,6 +261,7 @@ private fun MainScaffold(
                     "disk"     -> DiskScreen(vm, onBack = { nav.popBackStack() })
                     "users"    -> UsersScreen(vm, onBack = { nav.popBackStack() })
                     "log"      -> LogsScreen(vm, onBack = { nav.popBackStack() })
+                    "about-device" -> AboutDeviceScreen(vm, onBack = { nav.popBackStack() })
                     else -> SettingsHubScreen(
                         vm = vm,
                         onPick = { key -> nav.navigate("settings/$key") },
@@ -246,11 +273,37 @@ private fun MainScaffold(
             composable("channel-settings/{ch}") { entry ->
                 val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
                 ChannelSettingsScreen(
-                    vm         = vm,
-                    channelId  = ch,
-                    onBack     = { nav.popBackStack() },
-                    onNavigate = { key -> nav.navigate("settings/$key") },
+                    vm             = vm,
+                    channelId      = ch,
+                    onBack         = { nav.popBackStack() },
+                    onNavigate     = { route -> nav.navigate(route) },
+                    onOpenLive     = { liveCh -> nav.navigate("live/$liveCh") },
+                    onOpenNightMode = { nightCh -> nav.navigate("channel-night/$nightCh") },
                 )
+            }
+            composable("channel-night/{ch}") { entry ->
+                val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
+                OsdScreen(vm, onBack = { nav.popBackStack() }, channelId = ch)
+            }
+            composable("channel-osd/{ch}") { entry ->
+                val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
+                OsdScreen(vm, onBack = { nav.popBackStack() }, channelId = ch, osdOnly = true)
+            }
+            composable("channel-color/{ch}") { entry ->
+                val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
+                ImageColorScreen(vm, onBack = { nav.popBackStack() }, channelId = ch)
+            }
+            composable("channel-encode/{ch}") { entry ->
+                val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
+                EncodingScreen(vm, onBack = { nav.popBackStack() }, channelId = ch)
+            }
+            composable("channel-about/{ch}") { entry ->
+                val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
+                AboutChannelScreen(vm, channelId = ch, onBack = { nav.popBackStack() })
+            }
+            composable("channel-motion/{ch}") { entry ->
+                val ch = entry.arguments?.getString("ch")?.toIntOrNull() ?: 0
+                MotionDetectionScreen(vm, channelId = ch, onBack = { nav.popBackStack() })
             }
             composable("about-device") {
                 AboutDeviceScreen(
@@ -262,53 +315,6 @@ private fun MainScaffold(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun MeScreen(
-    email: String?,
-    onLogout: () -> Unit,
-    onOpenNvrSettings: () -> Unit,
-) {
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text("Me") })
-        },
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize(),
-            contentAlignment = androidx.compose.ui.Alignment.Center,
-        ) {
-            Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Default.AccountCircle,
-                    contentDescription = null,
-                    modifier = Modifier.size(72.dp).padding(bottom = 8.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (!email.isNullOrBlank()) {
-                    Text(email, fontSize = 14.sp)
-                    Spacer(Modifier.height(4.dp))
-                }
-                Text(
-                    "Profile — coming soon",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-                Spacer(Modifier.height(24.dp))
-                OutlinedButton(onClick = onOpenNvrSettings) {
-                    Text("NVR Settings")
-                }
-                Spacer(Modifier.height(8.dp))
-                TextButton(onClick = onLogout) {
-                    Text("Logout", color = MaterialTheme.colorScheme.error)
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun BottomTabBar(nav: NavController) {

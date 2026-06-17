@@ -14,6 +14,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -41,7 +42,7 @@ private data class PlayReq(val channel: Int, val beginSec: Long, val endSec: Lon
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null) {
+fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null, onViewLive: (() -> Unit)? = null) {
     val creds = vm.credentials
     // Pre-select whichever channel was highlighted in the LiveScreen grid.
     var channel by remember { mutableStateOf(vm.selectedLiveChannel) }
@@ -86,7 +87,8 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null) {
             )
         },
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
 
             // ---- Player (16:9) -----------------------------------------------
             Box(
@@ -117,7 +119,7 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null) {
                         key(p, ep) {
                             ReplayPlayer(
                                 host = ep.first, port = ep.second,
-                                user = creds.username, pass = creds.password,
+                                user = creds.username.ifBlank { "admin" }, pass = creds.password,
                                 channel = p.channel, beginEpoch = p.beginSec, endEpoch = p.endSec,
                             )
                         }
@@ -223,6 +225,34 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null) {
                 }
             }
         }
+        // View Live — bottom-right pill (mirrors "View Playback" on the Live screen)
+        if (onViewLive != null) {
+            Surface(
+                onClick = onViewLive,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(horizontal = 16.dp, vertical = 16.dp),
+                shape = RoundedCornerShape(50),
+                color = Color.White.copy(alpha = 0.10f),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        "View Live",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.85f),
+                    )
+                }
+            }
+        }
+        } // end outer Box
     }
 }
 

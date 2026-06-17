@@ -72,7 +72,7 @@ fun AboutDeviceScreen(
 }
 
 @Composable
-private fun AboutSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun AboutSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Column {
         Text(
             title,
@@ -92,7 +92,7 @@ private fun AboutSection(title: String, content: @Composable ColumnScope.() -> U
 }
 
 @Composable
-private fun AboutRow(label: String, value: String, last: Boolean) {
+internal fun AboutRow(label: String, value: String, last: Boolean) {
     Row(
         modifier = Modifier
             .fillMaxWidth()

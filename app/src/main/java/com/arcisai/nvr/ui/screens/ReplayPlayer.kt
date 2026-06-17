@@ -22,7 +22,7 @@ import com.arcisai.nvr.net.WsReplayClient
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
-private class Frame(val codec: String, val isKey: Boolean, val w: Int, val h: Int, val data: ByteArray)
+private class Frame(val codec: String, val isKey: Boolean, val w: Int, val h: Int, val data: ByteArray, val timestampSec: Long)
 
 /**
  * Plays an NVR recording over the WebSocket :10000 replay protocol and decodes the
@@ -45,8 +45,8 @@ private class ReplayController(
         running = true
         client = WsReplayClient(
             host, port, user, pass, channel, begin, end,
-            onFrame = { codec, isKey, w, h, data ->
-                if (running) { if (!queue.offer(Frame(codec, isKey, w, h, data))) queue.poll() }
+            onFrame = { codec, isKey, w, h, data, timestampSec ->
+                if (running) { if (!queue.offer(Frame(codec, isKey, w, h, data, timestampSec))) queue.poll() }
             },
             onStatus = onStatus,
             onError = { msg -> if (running) onStatus("Error: $msg") },
@@ -64,6 +64,9 @@ private class ReplayController(
         var codec: MediaCodec? = null
         var started = false
         var pts = 0L
+        var frameIndex = 0L
+        var firstNanos = 0L
+        var firstTs = -1L        // first valid firmware timestamp (seconds); -1 = use counter
         val info = MediaCodec.BufferInfo()
         try {
             while (running) {
@@ -77,15 +80,32 @@ private class ReplayController(
                     codec.configure(fmt, surface, null, 0)
                     codec.start()
                     started = true
+                    firstNanos = System.nanoTime()
+                    // Use firmware timestamp if it's within ±5 min of the requested range
+                    if (f.timestampSec in (begin - 300)..(end + 300)) firstTs = f.timestampSec
+                    pts = 0L
                     onStatus("Playing")
                 }
+
+                // Compute PTS: prefer firmware timestamp; fall back to 25 fps counter
+                pts = if (firstTs >= 0 && f.timestampSec >= firstTs) {
+                    (f.timestampSec - firstTs) * 1_000_000L
+                } else {
+                    frameIndex * 40_000L                   // 25 fps fallback
+                }
+                frameIndex++
+
+                // Real-time throttle: don't play faster than wall-clock time
+                val targetNanos = firstNanos + pts * 1000L
+                val sleepMs = (targetNanos - System.nanoTime()) / 1_000_000L
+                if (sleepMs > 2L) Thread.sleep(sleepMs)
+
                 val c = codec ?: continue
                 val inIdx = c.dequeueInputBuffer(10_000)
                 if (inIdx >= 0) {
                     val buf = c.getInputBuffer(inIdx)
                     buf?.clear(); buf?.put(f.data)
                     c.queueInputBuffer(inIdx, 0, f.data.size, pts, 0)
-                    pts += 66_666                          // ~15 fps spacing
                 }
                 var outIdx = c.dequeueOutputBuffer(info, 0)
                 while (outIdx >= 0) {

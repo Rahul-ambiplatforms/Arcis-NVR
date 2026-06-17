@@ -31,34 +31,27 @@ import com.arcisai.nvr.ui.theme.loginGradient
 import com.arcisai.nvr.viewmodel.NvrViewModel
 
 /**
- * Two flows on this screen:
- *   - LAN:    direct NVR IP + admin credentials → straight into the main app
- *   - Remote: Arcis cloud account (email/password) → MyNvrsScreen → pick NVR
+ * Cloud (Arcis account) login only.
  *
- * The Remote path's `onCloudAuth` lambda is what MainActivity uses to route
- * to the My-NVRs picker; the LAN path uses `onLanConnected` for the existing
- * direct-to-main flow.
+ * LAN direct-connect code is preserved in the block below and can be
+ * re-enabled by removing this file and restoring LoginScreen_LanBackup.kt.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
     vm: NvrViewModel,
-    onLanConnected: () -> Unit,
+    onLanConnected: () -> Unit,       // kept for nav graph compatibility; not used here
     onCloudAuthenticated: () -> Unit,
 ) {
-    var remote      by remember { mutableStateOf(false) }
-
-    // LAN form state
-    var host        by remember { mutableStateOf("") }
-    var port        by remember { mutableStateOf("") }
-    var lanUser     by remember { mutableStateOf("") }
-    var lanPass     by remember { mutableStateOf("") }
-    var lanPassVis  by remember { mutableStateOf(false) }
-
-    // Cloud (remote) form state
-    var email       by remember { mutableStateOf("") }
-    var pwd         by remember { mutableStateOf("") }
-    var pwdVis      by remember { mutableStateOf(false) }
+    var remote     by remember { mutableStateOf(true) }
+    var email      by remember { mutableStateOf("") }
+    var pwd        by remember { mutableStateOf("") }
+    var pwdVis     by remember { mutableStateOf(false) }
+    var host       by remember { mutableStateOf("") }
+    var port       by remember { mutableStateOf("") }
+    var lanUser    by remember { mutableStateOf("") }
+    var lanPass    by remember { mutableStateOf("") }
+    var lanPassVis by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier.fillMaxSize().background(loginGradient()),
@@ -85,24 +78,22 @@ fun LoginScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(
-                        if (remote) "Sign in" else "On this Wi-Fi",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 18.sp,
+                        if (remote) "Sign in" else "LAN Connect",
+                        fontWeight = FontWeight.SemiBold, fontSize = 18.sp,
+                    )
+                    SegmentedTabs(
+                        items = listOf("Cloud", "LAN"),
+                        selectedIndex = if (remote) 0 else 1,
+                        onSelect = { remote = it == 0 },
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
                         if (remote)
                             "Use your Arcis account. After signing in you'll see every NVR linked to your account."
                         else
-                            "Enter the NVR's IP address (printed on the box's LCD or shown on your router's clients list).",
+                            "Connect directly to your NVR on the local network.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    SegmentedTabs(
-                        items = listOf("LAN", "Remote (Account)"),
-                        selectedIndex = if (remote) 1 else 0,
-                        onSelect = { remote = (it == 1) },
-                        modifier = Modifier.fillMaxWidth(),
                     )
 
                     if (remote) {
@@ -164,7 +155,7 @@ fun LoginScreen(
                                 IconButton(onClick = { lanPassVis = !lanPassVis }) {
                                     Icon(
                                         imageVector = if (lanPassVis) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                        contentDescription = if (lanPassVis) "Hide password" else "Show password",
+                                        contentDescription = null,
                                     )
                                 }
                             },
@@ -185,12 +176,10 @@ fun LoginScreen(
                                 vm.accountLogin(email, pwd, onCloudAuthenticated)
                             } else {
                                 val p = port.toIntOrNull() ?: 80
-                                val creds = NvrCredentials(
-                                    host = host, port = p,
-                                    username = lanUser, password = lanPass,
-                                    remote = false,
+                                vm.login(
+                                    NvrCredentials(host = host, port = p, username = lanUser, password = lanPass, remote = false),
+                                    onLanConnected,
                                 )
-                                vm.login(creds, onLanConnected)
                             }
                         },
                         enabled = !vm.loginBusy && (
@@ -209,8 +198,7 @@ fun LoginScreen(
                         } else {
                             Text(
                                 if (remote) "Sign in" else "Connect",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                             )
                         }
                     }
@@ -266,3 +254,4 @@ private fun SegmentedTabs(
         }
     }
 }
+

@@ -105,8 +105,8 @@ class RemoteSession(
         agent = a
         a.gatherCandidates()
 
-        // Wait for full gathering (host + srflx + relay).
-        val gathered = withTimeoutOrNull(8_000) { gatheredDone.await() } != null
+        // Wait for gathering — 4 s is enough on typical networks (was 8 s).
+        val gathered = withTimeoutOrNull(4_000) { gatheredDone.await() } != null
         if (!gathered) {
             Log.w(tag, "[$serviceId] gathering timeout")
             return finishConnect(false)
@@ -137,8 +137,8 @@ class RemoteSession(
         a.remoteDescription = resp.providerSdp
         a.setRemoteGatheringDone()
 
-        // Wait for ICE to connect.
-        val ok = withTimeoutOrNull(20_000) { stateConnected.await() } ?: false
+        // Wait for ICE — 12 s covers most relay paths (was 20 s).
+        val ok = withTimeoutOrNull(12_000) { stateConnected.await() } ?: false
         Log.i(tag, "[$serviceId] connected=$ok")
         if (!ok) return finishConnect(false)
         connected.set(true)

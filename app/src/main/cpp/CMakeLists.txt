@@ -18,3 +18,8 @@ add_subdirectory(libjuice)
 add_library(juicejni SHARED juice_jni.cpp)
 target_include_directories(juicejni PRIVATE libjuice/include)
 target_link_libraries(juicejni juice-static log android)
+
+# 16 KB page-size alignment — required for Android 15+ devices.
+if(ANDROID)
+    target_link_options(juicejni PRIVATE "-Wl,-z,max-page-size=16384")
+endif()

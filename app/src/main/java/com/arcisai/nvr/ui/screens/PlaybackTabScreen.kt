@@ -47,7 +47,15 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null, onViewLive
     // Pre-select whichever channel was highlighted in the LiveScreen grid.
     var channel by remember { mutableStateOf(vm.selectedLiveChannel) }
     var dayMillis by remember { mutableStateOf(utcDayStart(System.currentTimeMillis())) }
-    var play by remember { mutableStateOf<PlayReq?>(null) }
+    var play       by remember { mutableStateOf<PlayReq?>(null) }
+    var seekTarget by remember { mutableStateOf<Long?>(null) }
+
+    // Sync timeline to current time when today is selected; reset on day change.
+    LaunchedEffect(dayMillis) {
+        val nowSec  = System.currentTimeMillis() / 1000L
+        val isToday = dayMillis == utcDayStart(System.currentTimeMillis())
+        seekTarget  = if (isToday) nowSec else null
+    }
 
     // Per-channel playback. Recordings live on the NVR HDD per channel, so we
     // list every channel that has a camera ASSIGNED — including one whose camera
@@ -178,7 +186,8 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null, onViewLive
             if (creds != null && !vm.recordSearchBusy && segments.isNotEmpty()) {
                 RecordingTimeline(
                     dayStartSec = dayStartSec,
-                    segments = segments,
+                    segments    = segments,
+                    seekToSec   = seekTarget,
                 ) { tappedSec ->
                     // Snap to the containing segment, else the next one after the tap.
                     val containing = segments.firstOrNull { tappedSec in it.startSec..it.endSec }
@@ -218,7 +227,10 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null, onViewLive
                                     append(" · ${mins} min")
                                 }, fontSize = 12.sp)
                             },
-                            modifier = Modifier.clickable { play = PlayReq(s.channel, s.startSec, s.endSec) },
+                            modifier = Modifier.clickable {
+                                play = PlayReq(s.channel, s.startSec, s.endSec)
+                                seekTarget = s.startSec
+                            },
                         )
                         HorizontalDivider()
                     }
@@ -261,18 +273,29 @@ fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null, onViewLive
  * to move the playhead and seek. `onSeek` fires with the chosen epoch (seconds).
  */
 @Composable
-private fun RecordingTimeline(
+internal fun RecordingTimeline(
     dayStartSec: Long,
     segments: List<NvrViewModel.RecordSegment>,
+    seekToSec: Long? = null,
     onSeek: (Long) -> Unit,
 ) {
     val dayEndSec = dayStartSec + 86_400L
-    var spanSec by remember { mutableStateOf(3600f) }            // seconds visible across the width
+    var spanSec by remember { mutableStateOf(3600f) }
+    val nowSec  = System.currentTimeMillis() / 1000L
+    val isToday = nowSec >= dayStartSec && nowSec < dayStartSec + 86_400L
     // The centre line is the playhead; centerSec is the time under it. Double so
     // large epochs keep second-precision (Float would quantise to ~128s).
-    var centerSec by remember(dayStartSec, segments) {
-        mutableStateOf((segments.minByOrNull { it.startSec }?.startSec
-            ?: (dayStartSec + 43_200L)).toDouble())
+    var centerSec by remember(dayStartSec) {
+        mutableStateOf(if (isToday) nowSec.toDouble() else (dayStartSec + 43_200L).toDouble())
+    }
+    // For past days, jump to the first segment once they load.
+    LaunchedEffect(segments) {
+        if (!isToday && segments.isNotEmpty())
+            centerSec = segments.minByOrNull { it.startSec }!!.startSec.toDouble()
+    }
+    // External seek (from parent: today sync or segment-list click).
+    LaunchedEffect(seekToSec) {
+        if (seekToSec != null) centerSec = seekToSec.toDouble()
     }
     val onSurface = MaterialTheme.colorScheme.onSurface
     val segColor = MaterialTheme.colorScheme.primary
@@ -371,15 +394,15 @@ private fun recTypeLabel(t: String): String = when (t.trim()) {
 }
 
 // --- UTC time helpers (NVR records are local-wall-clock-as-UTC) -------------
-private fun utcDayStart(millis: Long): Long {
+internal fun utcDayStart(millis: Long): Long {
     val day = java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneOffset.UTC).toLocalDate()
     return day.atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
 }
 
-private fun utcDayLabel(millis: Long): String =
+internal fun utcDayLabel(millis: Long): String =
     java.time.Instant.ofEpochMilli(millis).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()
 
-private fun utcTime(sec: Long): String =
+internal fun utcTime(sec: Long): String =
     java.time.Instant.ofEpochSecond(sec).atZone(java.time.ZoneOffset.UTC)
         .toLocalTime().withNano(0).toString()
 

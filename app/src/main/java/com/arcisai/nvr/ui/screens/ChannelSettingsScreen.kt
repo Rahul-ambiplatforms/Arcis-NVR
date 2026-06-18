@@ -212,15 +212,15 @@ fun ChannelSettingsScreen(
                 Spacer(Modifier.height(20.dp))
             }
 
-            // ── Motion & Alerts ───────────────────────────────────────────
-            item { ChSectionHeader("Motion & Alerts") }
+            // ── Events ────────────────────────────────────────────────────
+            item { ChSectionHeader("Events") }
             item {
                 ChGroup(surface) {
                     ChIconNavRow(
                         icon    = Icons.Default.DirectionsRun,
                         iconBg  = Color(0xFFE53935),
-                        title   = "Motion Detection",
-                        subtitle = "Detection, human tracking & push alerts",
+                        title   = "Detection & Alerts",
+                        subtitle = "Motion, human tracking & push notifications",
                         label   = label, chevron = chevron,
                         onClick = { onNavigate("channel-motion/$channelId") },
                     )

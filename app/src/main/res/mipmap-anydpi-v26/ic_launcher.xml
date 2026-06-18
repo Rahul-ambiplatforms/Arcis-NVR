@@ -4,11 +4,11 @@
     <foreground>
         <inset
             android:drawable="@drawable/arcisai_logo"
-            android:inset="18%" />
+            android:inset="25%" />
     </foreground>
     <monochrome>
         <inset
             android:drawable="@drawable/arcisai_logo"
-            android:inset="18%" />
+            android:inset="25%" />
     </monochrome>
 </adaptive-icon>

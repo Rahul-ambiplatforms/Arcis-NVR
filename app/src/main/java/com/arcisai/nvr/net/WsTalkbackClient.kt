@@ -1,5 +1,6 @@
 package com.arcisai.nvr.net
 
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -53,6 +54,7 @@ class WsTalkbackClient(
     private enum class St { OPENING, IOT, AUTH, READY }
 
     fun start() {
+        Log.d(TAG, "start() host=$host port=$port channel=$channel user='$username'")
         val req = Request.Builder().url("ws://$host:$port").build()
         ws = client.newWebSocket(req, Listener())
     }
@@ -63,12 +65,22 @@ class WsTalkbackClient(
         le32(VCON_DATA).copyInto(p, 0)
         g711.copyInto(p, 4)
         runCatching { sendApi(VCON_REQ, p) }
+        Log.v(TAG, "sendAudio ${g711.size} bytes")
     }
 
     fun stop() {
         if (!closed.compareAndSet(false, true)) return
+        Log.d(TAG, "stop() state=$state")
         pingThread?.interrupt()
-        runCatching { sendApi(VCON_REQ, vconCtrlPayload(VCON_DESTROY)) }
+        if (state == St.READY || state == St.AUTH) {
+            runCatching {
+                val hangupPayload = ByteArray(8)
+                le32(VOP2P_HANGUP).copyInto(hangupPayload, 0)
+                le32(channel).copyInto(hangupPayload, 4)
+                sendApi(VOP2P_REQ, hangupPayload)
+            }
+            runCatching { sendApi(VCON_REQ, vconCtrlPayload(VCON_DESTROY)) }
+        }
         runCatching { ws?.close(1000, null) }
         runCatching { client.dispatcher.executorService.shutdown() }
     }
@@ -152,6 +164,7 @@ class WsTalkbackClient(
 
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            Log.d(TAG, "WS onOpen → sending ARQ open_conn sid=$sid")
             val f = ByteArray(20)
             for (i in 0 until 16) f[i] = OPEN_MAGIC[i].toByte()
             le32(sid).copyInto(f, 16)
@@ -164,6 +177,7 @@ class WsTalkbackClient(
             if (b.isEmpty()) return
             if ((b[0].toInt() and 0xff) == 0xCE) return  // ARQ header frame — discard
             if (state == St.OPENING) {
+                Log.d(TAG, "ARQ open_conn_res received → sending IOT_OPEN_REQ")
                 state = St.IOT
                 val openReq = ByteArray(8); le32(sid).copyInto(openReq, 0)
                 sendArq(iotHdr(IOT_OPEN_REQ, openReq))
@@ -173,20 +187,28 @@ class WsTalkbackClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            Log.e(TAG, "WS onFailure: ${t.message}", t)
             if (!closed.get()) onError(t.message ?: "Connection error")
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            Log.d(TAG, "WS onClosed code=$code reason=$reason")
             if (!closed.get()) onError("Connection closed")
         }
     }
 
     private fun handlePacket(b: ByteArray) {
-        if (b.size < 32 || (b[0].toInt() and 0xff) != 0xAB) return
+        if (b.size < 32 || (b[0].toInt() and 0xff) != 0xAB) {
+            Log.w(TAG, "handlePacket: bad magic or size=${b.size}")
+            return
+        }
         val iotCmd = b[4].toInt() and 0xff
+        Log.d(TAG, "handlePacket iotCmd=$iotCmd state=$state pktSize=${b.size}")
         if (iotCmd == IOT_OPEN_RES) {
-            if (u32(b, 24) == 0) { state = St.AUTH; sendApi(AUTH_REQ, authPayload()) }
-            else onError("Link open failed")
+            val ecode = u32(b, 24)
+            Log.d(TAG, "IOT_OPEN_RES ecode=$ecode")
+            if (ecode == 0) { state = St.AUTH; sendApi(AUTH_REQ, authPayload()) }
+            else onError("Link open failed (ecode=$ecode)")
             return
         }
         if (iotCmd != IOT_DATA && iotCmd != IOT_DATA_PRIOR) return
@@ -195,13 +217,45 @@ class WsTalkbackClient(
         if (inner.size < 24) return
         if ((inner[0].toInt() and 0xff) != 0x50 || (inner[1].toInt() and 0xff) != 0x32) return
         val apiCmd = u32(inner, 12); val result = u32(inner, 16)
+        Log.d(TAG, "P2PK apiCmd=$apiCmd result=$result (0x${result.toUInt().toString(16)})")
         when (apiCmd) {
             AUTH_RSP -> if (result == 0) {
-                sendApi(VCON_REQ, vconCtrlPayload(VCON_CREATE))
+                // Try VOP2P_CALL (cmd=60) — alternate talkback protocol; fallback to VCON_CREATE
+                Log.d(TAG, "AUTH OK → sending VOP2P_CALL channel=$channel")
+                val vop2pPayload = ByteArray(8)
+                le32(VOP2P_CALL).copyInto(vop2pPayload, 0)
+                le32(channel).copyInto(vop2pPayload, 4)
+                sendApi(VOP2P_REQ, vop2pPayload)
                 startPing()
+                // Also send VCON_CREATE right after in case VOP2P is not handled
+                Log.d(TAG, "Also sending VCON_CREATE channel=$channel")
+                sendApi(VCON_REQ, vconCtrlPayload(VCON_CREATE))
+                // 5-second timeout: if neither RSP arrives, fail with clear message
+                Thread {
+                    try {
+                        Thread.sleep(5_000)
+                        if (state == St.AUTH && !closed.get()) {
+                            Log.w(TAG, "Talkback timeout — no VOP2P/VCON response from NVR")
+                            onError("Two-way audio not supported by this device")
+                        }
+                    } catch (_: InterruptedException) { }
+                }.apply { isDaemon = true; start() }
             } else onError("Auth failed (code $result)")
-            VCON_RSP -> if (result == 0) { state = St.READY; onReady() }
-                        else onError("Talkback rejected (code $result)")
+            VOP2P_RSP -> if (result == 0) {
+                Log.d(TAG, "VOP2P_RSP OK → READY")
+                state = St.READY; onReady()
+            } else {
+                Log.e(TAG, "VOP2P_RSP failed result=$result")
+                // Don't onError here; wait for VCON_RSP which was also sent
+            }
+            VCON_RSP -> if (result == 0) {
+                Log.d(TAG, "VCON_RSP OK → READY")
+                if (state == St.AUTH) { state = St.READY; onReady() }
+            } else {
+                Log.e(TAG, "VCON_RSP failed result=$result (0x${result.toUInt().toString(16)})")
+                onError("Talkback rejected (code $result)")
+            }
+            else -> Log.w(TAG, "Unexpected apiCmd=$apiCmd result=$result")
         }
     }
 
@@ -219,6 +273,7 @@ class WsTalkbackClient(
     }
 
     companion object {
+        private const val TAG = "WsTalkback"
         private val OPEN_MAGIC = intArrayOf(
             0xd9, 0xff, 0xcc, 0x02, 0x8c, 0x38, 0xee, 0xd2,
             0xd1, 0x99, 0xac, 0x60, 0x26, 0x94, 0x7f, 0xae)
@@ -235,6 +290,10 @@ class WsTalkbackClient(
         private const val VCON_CREATE = 1
         private const val VCON_DATA = 2
         private const val VCON_DESTROY = 3
+        private const val VOP2P_REQ = 60
+        private const val VOP2P_RSP = 61
+        private const val VOP2P_CALL = 1
+        private const val VOP2P_HANGUP = 2
 
         /**
          * G.711 A-law encoder (ITU-T G.711 / G.191).

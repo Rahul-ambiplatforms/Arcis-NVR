@@ -26,6 +26,7 @@ android {
                 cppFlags  += "-std=c++17"
                 cFlags    += "-std=c11"
                 arguments += "-DANDROID_STL=c++_shared"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
         }
     }
@@ -37,9 +38,21 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile        = file("arcisai-release.jks")
+            storePassword    = "ArcisAI@2024"
+            keyAlias         = "arcisai"
+            keyPassword      = "ArcisAI@2024"
+            enableV1Signing  = true
+            enableV2Signing  = true
+        }
+    }
+
     buildTypes {
         debug {}
         release {
+            signingConfig  = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

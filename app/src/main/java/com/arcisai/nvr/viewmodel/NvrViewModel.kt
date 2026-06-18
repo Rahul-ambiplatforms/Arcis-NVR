@@ -1356,6 +1356,69 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
+    // ---- Motion Events (motion-only recording search) -----------------------
+    var motionEventSegments by mutableStateOf<List<RecordSegment>?>(null)
+    var motionEventBusy     by mutableStateOf(false)
+    var motionEventStatus   by mutableStateOf<String?>(null)
+    private var motionEventJob: Job? = null
+
+    fun searchMotionEvents(channelId: Int, dayUtcMillis: Long) {
+        val a = api ?: run { motionEventStatus = "Not connected"; return }
+        motionEventJob?.cancel()
+        motionEventBusy = true
+        motionEventStatus = null
+        motionEventSegments = null
+        motionEventJob = viewModelScope.launch {
+            try {
+                val date = java.time.Instant.ofEpochMilli(dayUtcMillis)
+                    .atZone(java.time.ZoneOffset.UTC).toLocalDate().toString()
+                val channelMask = JSONArray()
+                for (i in 0 until maxChannels) channelMask.put(if (i == channelId) "True" else "False")
+                // Type = [Timing, Motion, Alarm, Manual] — Motion only (index 1)
+                val typeMask = JSONArray().apply {
+                    put("False"); put("True"); put("False"); put("False")
+                }
+                val param = JSONObject()
+                    .put("Channel", channelMask)
+                    .put("Type", typeMask)
+                    .put("Date", date)
+                    .put("BeginTime", "00:00:00")
+                    .put("EndTime", "23:59:59")
+                    .put("PageSize", 200)
+                    .put("CurrentPage", "1")
+                    .put("Reload", "True")
+                val resp = JSONObject(a.searchRecord(netsdkEnvelope("R.SearchRecord", param)))
+                val arr = findRecordArray(resp)
+                val out = ArrayList<RecordSegment>()
+                if (arr != null) for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val s = o.optLong("TimeStart", o.optLong("BeginTime", 0))
+                    val e = o.optLong("TimeEnd", o.optLong("EndTime", 0))
+                    if (s > 0 && e > s) out.add(
+                        RecordSegment(o.optInt("Channel", channelId), s, e, o.optString("Type")))
+                }
+                motionEventSegments = out
+                motionEventStatus = if (out.isEmpty()) "No motion events for that day" else null
+            } catch (_: kotlinx.coroutines.CancellationException) {
+            } catch (t: Throwable) {
+                if (!isActive) return@launch
+                motionEventStatus = "Search failed: ${t.message}"
+            } finally {
+                motionEventBusy = false
+            }
+        }
+    }
+
+    fun isMotionEnabled(channelId: Int): Boolean {
+        val arr = motionDetectionCfg?.optJSONArray("MotionDetection") ?: return false
+        for (i in 0 until arr.length()) {
+            val ch = arr.optJSONObject(i) ?: continue
+            if (ch.optInt("ID") == channelId)
+                return ch.optString("MDEnable").equals("True", ignoreCase = true)
+        }
+        return false
+    }
+
     @Volatile private var replayTunnel: RemoteSession? = null
 
     /** Resolve the host:port for the :10000 replay stream. LAN → (host, 10000);
@@ -1686,15 +1749,20 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         alarmJob?.cancel()
         cameraAlarmActive = true
         alarmJob = viewModelScope.launch {
-            runCatching { api?.triggerSiren(durationSec) }
+            runCatching { api?.triggerIpcAlarm(channelId, durationSec) }   // camera speaker
+            runCatching { api?.triggerSiren(durationSec) }                    // NVR buzzer too
             kotlinx.coroutines.delay(durationSec * 1_000L)
+            runCatching { api?.stopIpcAlarm(channelId) }
             cameraAlarmActive = false
         }
     }
 
     fun stopCameraAlarm(channelId: Int) {
         alarmJob?.cancel()
-        viewModelScope.launch { runCatching { api?.stopSiren() } }
+        viewModelScope.launch {
+            runCatching { api?.stopIpcAlarm(channelId) }
+            runCatching { api?.stopSiren() }
+        }
         cameraAlarmActive = false
     }
 
@@ -1995,19 +2063,42 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 perChannelColor = perChannelColor.toMutableMap().apply { put(channelId, echoed) }
                 settingStatus = "Camera ${channelId + 1} image saved"
             } catch (t: NetSdkException) {
-                settingStatus = "Camera ${channelId + 1} image save failed: HTTP ${t.httpCode} — ${t.responseBody.take(120)}"
+                settingStatus = "Camera ${channelId + 1}: Save failed (HTTP ${t.httpCode})"
             } catch (t: Throwable) {
-                settingStatus = "Camera ${channelId + 1} image save failed: ${t.message}"
+                settingStatus = "Camera ${channelId + 1}: ${sanitizeError(t.message)}"
             }
+        }
+    }
+
+    var settingsLoading by mutableStateOf(false)
+
+    private fun sanitizeError(msg: String?): String {
+        if (msg == null) return "Unexpected error"
+        return when {
+            msg.contains("127.0.0.1") || msg.contains("unexpected end", ignoreCase = true) ||
+            msg.contains("ECONNREFUSED") || msg.contains("Connection refused", ignoreCase = true) ||
+            msg.contains("failed to connect", ignoreCase = true) ->
+                "Connection error — check NVR network"
+            msg.contains("timeout", ignoreCase = true) ||
+            msg.contains("timed out", ignoreCase = true) ||
+            msg.contains("SocketTimeoutException", ignoreCase = true) ->
+                "Request timed out — NVR may be busy"
+            msg.contains("HTTP 401") || msg.contains("Unauthorized", ignoreCase = true) ->
+                "Authentication failed — check NVR credentials"
+            msg.length > 80 -> msg.take(80) + "…"
+            else -> msg
         }
     }
 
     private fun <T> launchBlock(load: suspend () -> T?, onValue: (T) -> Unit) {
         viewModelScope.launch {
+            settingsLoading = true
             try {
                 load()?.let(onValue)
             } catch (t: Throwable) {
-                settingStatus = t.message
+                settingStatus = sanitizeError(t.message)
+            } finally {
+                settingsLoading = false
             }
         }
     }
@@ -2015,12 +2106,15 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     private fun launchSave(call: suspend () -> String?, okMessage: String, then: () -> Unit) {
         viewModelScope.launch {
             settingStatus = null  // ensure LaunchedEffect fires even on repeated identical saves
+            settingsLoading = true
             try {
                 call()
                 settingStatus = okMessage
                 then()
             } catch (t: Throwable) {
-                settingStatus = "Failed: ${t.message}"
+                settingStatus = "Failed: ${sanitizeError(t.message)}"
+            } finally {
+                settingsLoading = false
             }
         }
     }

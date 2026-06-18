@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -179,12 +180,15 @@ fun SettingsHubScreen(
                 item {
                     SettingsGroup {
                         allChs.forEachIndexed { idx, ch ->
-                            val online = vm.connectedChannels?.contains(ch.id)
+                            val online   = vm.connectedChannels?.contains(ch.id)
+                            val hasCam   = ch.ipAddr.isNotBlank()
+                            val canOpen  = hasCam && online != false
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onChannelSettings(ch.id) }
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                    .clickable(enabled = canOpen) { onChannelSettings(ch.id) }
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                                    .then(if (!canOpen) Modifier.alpha(0.45f) else Modifier),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
@@ -193,7 +197,14 @@ fun SettingsHubScreen(
                                     fontWeight = FontWeight.Normal,
                                     fontSize = 15.sp,
                                 )
-                                if (online != null) {
+                                if (!hasCam) {
+                                    Text(
+                                        "No camera",
+                                        fontSize = 12.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                    )
+                                } else if (online != null) {
                                     Text(
                                         if (online) "Online" else "Offline",
                                         fontSize = 14.sp,
@@ -204,7 +215,8 @@ fun SettingsHubScreen(
                                 Icon(
                                     Icons.AutoMirrored.Filled.ArrowForwardIos,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.outline,
+                                    tint = if (canOpen) MaterialTheme.colorScheme.outline
+                                           else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
                                     modifier = Modifier.size(13.dp),
                                 )
                             }

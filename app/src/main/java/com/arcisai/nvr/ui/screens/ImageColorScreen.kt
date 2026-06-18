@@ -259,57 +259,51 @@ private fun PerChannelColorContent(cfg: JSONObject, onApply: (JSONObject) -> Uni
 
         Spacer(Modifier.height(12.dp))
 
-        // ── Camera state info (collapsible) ───────────────────────────────
-        if (readOnlyKeys.isNotEmpty()) {
-            var expanded by remember { mutableStateOf(false) }
+        // ── Camera Status — friendly read-only summary ────────────────────
+        val statusRows = readOnlyKeys.mapNotNull { key ->
+            val label = FRIENDLY_KEY_LABELS[key] ?: return@mapNotNull null
+            val value = friendlyReadOnlyValue(key, cfg.opt(key)) ?: return@mapNotNull null
+            label to value
+        }
+        if (statusRows.isNotEmpty()) {
             OutlinedCard(
                 modifier = Modifier.fillMaxWidth(),
                 shape    = RoundedCornerShape(14.dp),
             ) {
-                Column {
+                Column(modifier = Modifier.padding(vertical = 4.dp)) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { expanded = !expanded }
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Camera Info (read-only)",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.weight(1f))
-                        Icon(
-                            if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Icon(Icons.Default.Tune, null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Camera Status", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     }
-                    if (expanded) {
-                        HorizontalDivider()
-                        for (key in readOnlyKeys) {
-                            val raw = cfg.opt(key)
-                            val display = when (raw) {
-                                is org.json.JSONObject -> summariseJson(raw)
-                                is org.json.JSONArray  -> "${raw.length()} entries"
-                                null -> "—"
-                                else -> raw.toString()
-                            }
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                    HorizontalDivider()
+                    statusRows.forEach { (label, value) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                label,
+                                fontSize = 13.sp,
+                                color    = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
                             ) {
                                 Text(
-                                    prettify(key),
-                                    fontSize  = 13.sp,
-                                    modifier  = Modifier.weight(1f),
-                                    color     = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                Text(
-                                    display,
-                                    fontSize = 13.sp,
+                                    value,
+                                    fontSize   = 12.sp,
                                     fontWeight = FontWeight.Medium,
+                                    modifier   = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                                 )
                             }
                         }
@@ -331,8 +325,7 @@ private fun PerChannelColorContent(cfg: JSONObject, onApply: (JSONObject) -> Uni
             },
         ) {
             Text(
-                if (pending.isEmpty()) "Apply (no changes)"
-                else "Apply ${pending.size} change${if (pending.size == 1) "" else "s"}",
+                if (pending.isEmpty()) "Apply" else "Apply changes",
                 fontSize = 15.sp,
             )
         }
@@ -517,7 +510,7 @@ private fun DynamicImageForm(cfg: JSONObject, onApply: (JSONObject) -> Unit) {
 
     if (readOnlyKeys.isNotEmpty()) {
         Spacer(Modifier.height(8.dp))
-        SectionLabel("Current camera state (read-only)")
+        SectionLabel("Camera Status")
         for (key in readOnlyKeys) {
             val raw     = cfg.opt(key)
             val display = when (raw) {
@@ -539,7 +532,7 @@ private fun DynamicImageForm(cfg: JSONObject, onApply: (JSONObject) -> Unit) {
             for ((k, v) in pending) body.put(k, v)
             onApply(body)
         },
-    ) { Text(if (pending.isEmpty()) "Apply (no changes)" else "Apply ${pending.size} change${if (pending.size == 1) "" else "s"}") }
+    ) { Text(if (pending.isEmpty()) "Apply" else "Apply changes") }
 }
 
 // ─── All-channel shared controls (same as before) ────────────────────────────
@@ -606,6 +599,77 @@ private fun summariseJson(o: org.json.JSONObject): String {
         parts += "$k=${when (v) { is org.json.JSONObject -> "{…}"; is org.json.JSONArray -> "[…]"; null -> "null"; else -> v.toString() }}"
     }
     return parts.joinToString(", ")
+}
+
+private val FRIENDLY_KEY_LABELS: Map<String, String> = mapOf(
+    "BLcompensationMode" to "Backlight Compensation",
+    "WDR"                to "Wide Dynamic Range",
+    "awbMode"            to "White Balance",
+    "denoise3d"          to "Noise Reduction",
+    "exposureMode"       to "Exposure",
+    "irCut"              to "Night Vision",
+    "irCutControlMode"   to "Night Vision",
+    "lowlightMode"       to "Low Light Mode",
+    "sceneMode"          to "Scene",
+    "mirror"             to "Mirror",
+    "flip"               to "Flip",
+    "manual"             to "Manual Mode",
+)
+
+private fun friendlyReadOnlyValue(key: String, raw: Any?): String? {
+    if (raw == null) return null
+    return when (raw) {
+        is Boolean             -> if (raw) "On" else "Off"
+        is Number              -> raw.toString()
+        is String              -> friendlyString(raw)
+        is org.json.JSONObject -> friendlyJsonObject(key, raw)
+        else                   -> null
+    }
+}
+
+private fun friendlyString(s: String): String = when (s.lowercase().trim()) {
+    "auto"       -> "Auto"
+    "close"      -> "Off"
+    "open"       -> "On"
+    "only night" -> "Night only"
+    "always"     -> "Always on"
+    "indoor"     -> "Indoor"
+    "outdoor"    -> "Outdoor"
+    "manual"     -> "Manual"
+    "software"   -> "Auto (software)"
+    "hardware"   -> "Hardware"
+    "true"       -> "On"
+    "false"      -> "Off"
+    else         -> s.replaceFirstChar { it.uppercase() }
+}
+
+private fun friendlyJsonObject(key: String, o: org.json.JSONObject): String? {
+    val k = key.lowercase()
+    return when {
+        k.contains("wdr") -> {
+            val on  = o.optBoolean("enabled", false) || o.optString("enabled").equals("true", true)
+            val lvl = o.optInt("WDRStrength", 0)
+            if (on) "On${if (lvl > 0) " · Level $lvl" else ""}" else "Off"
+        }
+        k.contains("denoise") -> {
+            val on  = o.optBoolean("enabled", false) || o.optString("enabled").equals("true", true)
+            val lvl = o.optInt("denoise3dStrength", 0)
+            if (on) "On${if (lvl > 0) " · Level $lvl" else ""}" else "Off"
+        }
+        k.contains("ircut") || k.contains("ir") -> {
+            val mode = o.optString("irCutMode", "").lowercase()
+            when (mode) { "auto" -> "Auto"; "day" -> "Day mode"; "night" -> "Night mode"; else -> "Auto" }
+        }
+        k.contains("manual") -> {
+            val on = o.optBoolean("enabled", false) || o.optString("enabled").equals("true", true)
+            if (on) "On" else "Off"
+        }
+        o.has("enabled") -> {
+            val on = o.optBoolean("enabled", false) || o.optString("enabled").equals("true", true)
+            if (on) "On" else "Off"
+        }
+        else -> null
+    }
 }
 
 private fun prettify(camel: String): String {

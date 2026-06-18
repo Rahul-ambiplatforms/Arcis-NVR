@@ -173,9 +173,20 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun statIpc(): String = get("/netsdk/Stat/IPC")
 
     // ------------------------------------------------------------------
-    // Alarm / siren — manual trigger of NVR built-in buzzer
+    // Alarm / siren
     // ------------------------------------------------------------------
-    /** Trigger NVR built-in siren/buzzer for [durationSec] seconds. */
+    /** Trigger camera (IP cam) alarm for [channelId] — plays the camera's built-in siren audio.
+     *  Uses /netsdk/Event/IPCAlarm (same namespace as Event/Buzzer for NVR buzzer). */
+    suspend fun triggerIpcAlarm(channelId: Int, durationSec: Int = 10): String =
+        put("/netsdk/Event/IPCAlarm",
+            JSONObject().put("ID", channelId).put("Enable", "True").put("Duration", durationSec).toString())
+
+    /** Stop camera alarm for [channelId]. */
+    suspend fun stopIpcAlarm(channelId: Int): String =
+        put("/netsdk/Event/IPCAlarm",
+            JSONObject().put("ID", channelId).put("Enable", "False").toString())
+
+    /** Trigger NVR built-in buzzer for [durationSec] seconds (NVR beep, not camera speaker). */
     suspend fun triggerSiren(durationSec: Int = 10): String =
         put("/netsdk/Event/Buzzer",
             JSONObject().put("Enable", "True").put("Duration", durationSec).toString())

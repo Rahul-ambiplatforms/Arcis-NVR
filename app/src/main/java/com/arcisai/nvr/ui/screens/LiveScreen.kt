@@ -72,6 +72,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.arcisai.nvr.data.NvrCredentials
+import com.arcisai.nvr.net.WsAudioListenClient
 import com.arcisai.nvr.net.WsTalkbackClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -113,6 +114,17 @@ fun LiveScreen(
 
     LaunchedEffect(Unit) { viewModel.loadIpCamInfo() }
 
+    // Pre-warm LibVLC on IO thread the moment the screen is entered.
+    // VlcSingleton.get() takes 200-500ms on the main thread the first time;
+    // doing it here in background means tiles find it already ready.
+    val prewarmCtx = LocalContext.current
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            VlcSingleton.get(prewarmCtx)
+        }
+        viewModel.loadConnectedChannels()
+    }
+
     // Tab-root mode: refresh channels on every resume (lifecycle observer)
     if (isTabRoot) {
         val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
@@ -138,6 +150,7 @@ fun LiveScreen(
     var showPresets by remember { mutableStateOf(false) }
     var ptzSpeed by remember { mutableIntStateOf(4) }
     var singleChannelView by remember { mutableStateOf(false) }
+    var showEventsScreen  by remember { mutableStateOf(false) }
     var snapshotTrigger by remember { mutableIntStateOf(0) }
     var isRecording by remember { mutableStateOf(false) }
     val activity = LocalContext.current as? Activity
@@ -153,7 +166,6 @@ fun LiveScreen(
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
 
-    // Camera-alarm state mirrors ViewModel — siren plays on the NVR, not the phone
     val sirenActive = viewModel.cameraAlarmActive
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
@@ -181,6 +193,34 @@ fun LiveScreen(
             talkHost = viewModel.credentials?.host ?: ""
             talkPort = 10000
         }
+    }
+
+    // Audio listen — start/stop WsAudioListenClient when user toggles the speaker.
+    // Uses the same talkHost/talkPort as the talkback button (LAN or P2P tunnel).
+    val audioListenClient = remember { mutableStateOf<WsAudioListenClient?>(null) }
+    LaunchedEffect(audioMuted, selectedChannel, talkHost, talkPort) {
+        val cur = audioListenClient.value
+        if (!audioMuted && talkHost.isNotBlank()) {
+            if (cur == null) {
+                val wsUser = viewModel.credentials?.username.orEmpty().ifBlank { "admin" }
+                val wsPass = viewModel.credentials?.password ?: ""
+                val c = WsAudioListenClient(
+                    host = talkHost, port = talkPort,
+                    username = wsUser, password = wsPass,
+                    channel = selectedChannel,
+                    onReady = {},
+                    onError = { /* swallow silently — audio is optional */ },
+                )
+                audioListenClient.value = c
+                c.start()
+            }
+        } else {
+            cur?.stop()
+            audioListenClient.value = null
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { audioListenClient.value?.stop(); audioListenClient.value = null }
     }
 
     val deviceName = viewModel.displayNvrName
@@ -277,6 +317,20 @@ fun LiveScreen(
         return
     }
 
+    // ── EVENTS view ───────────────────────────────────────────────────────────
+    if (showEventsScreen) {
+        EventsTabScreen(
+            channelId = selectedChannel,
+            vm = viewModel,
+            onBack = { showEventsScreen = false },
+            onNavigateToChannelSettings = { chId ->
+                showEventsScreen = false
+                onNavigateToSettings(chId)
+            },
+        )
+        return
+    }
+
     // ── NORMAL (GRID) view ────────────────────────────────────────────────────
     Scaffold(
         topBar = {
@@ -297,8 +351,13 @@ fun LiveScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { onNavigateToSettings(selectedChannel) }) {
-                        Icon(Icons.Default.Settings, "Settings")
+                    IconButton(
+                        onClick  = { onNavigateToSettings(selectedChannel) },
+                        enabled  = assigned && !offline,
+                    ) {
+                        Icon(Icons.Default.Settings, "Settings",
+                            tint = if (assigned && !offline) LocalContentColor.current
+                                   else LocalContentColor.current.copy(alpha = 0.35f))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -317,10 +376,13 @@ fun LiveScreen(
                     talkHost = talkHost,
                     talkPort = talkPort,
                     onDevice = onBack ?: {},
-                    onEvents = { /* TODO: events screen */ },
+                    onEvents = { showEventsScreen = true },
                     showPresets = showPresets,
                     onPresetsToggle = { showPresets = !showPresets },
                     onMore = { showMoreSheet = true },
+                    onTalkError = { msg ->
+                        coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+                    },
                 )
             }
         },
@@ -341,15 +403,37 @@ fun LiveScreen(
                     initialPage = startPage,
                     pageCount = { TOTAL },
                 )
-                // Update selectedChannel when the user settles on a new page
+                var zoomScale by remember { mutableFloatStateOf(1f) }
+                val zoomTransform = rememberTransformableState { zoom, _, _ ->
+                    zoomScale = (zoomScale * zoom).coerceIn(1f, 5f)
+                }
+                // Zoom only when the current channel is actually playing
+                val currentCh = allChannels.firstOrNull { it.id == selectedChannel }
+                val zoomEnabled = currentCh != null &&
+                    currentCh.ipAddr.isNotBlank() &&
+                    viewModel.connectedChannels?.contains(selectedChannel) == true &&
+                    !viewModel.isChannelOffline(selectedChannel)
+                // Reset zoom immediately when the channel goes offline / loading
+                LaunchedEffect(zoomEnabled) { if (!zoomEnabled) zoomScale = 1f }
+                // Update selectedChannel when the user settles on a new page; reset zoom
                 LaunchedEffect(pagerState.settledPage) {
                     allChannels.getOrNull(pagerState.settledPage % count)?.id?.let { selectedChannel = it }
+                    zoomScale = 1f
                 }
-                Box(Modifier.fillMaxWidth().weight(1f)) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clipToBounds()
+                        .transformable(zoomTransform, enabled = zoomEnabled),
+                ) {
                     HorizontalPager(
                         state = pagerState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { scaleX = zoomScale; scaleY = zoomScale; clip = true },
                         beyondViewportPageCount = 0,
+                        userScrollEnabled = zoomScale == 1f,
                     ) { rawPage ->
                         val ch = allChannels.getOrNull(rawPage % count)
                         if (ch != null) {
@@ -364,7 +448,7 @@ fun LiveScreen(
                                 audioMuted = audioMuted,
                                 viewModel = viewModel,
                                 onTap = {},
-                                onDoubleTap = {},
+                                onDoubleTap = { if (zoomScale > 1f) zoomScale = 1f else singleChannelView = false },
                                 onThumbnail = { bmp -> viewModel.setChannelThumbnail(ch.id, bmp) },
                                 snapshotTrigger = if (ch.id == selectedChannel) snapshotTrigger else 0,
                                 isRecording = ch.id == selectedChannel && isRecording,
@@ -410,6 +494,7 @@ fun LiveScreen(
                         audioMuted = audioMuted,
                         viewModel = viewModel,
                         onChannelTap = { selectedChannel = it },
+                        onDoubleTap = { ch -> selectedChannel = ch; singleChannelView = true },
                         onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
                         snapshotTrigger = snapshotTrigger,
                         isRecording = isRecording,
@@ -438,6 +523,7 @@ fun LiveScreen(
                                 audioMuted = audioMuted,
                                 viewModel = viewModel,
                                 onChannelTap = { selectedChannel = it },
+                                onDoubleTap = { ch -> selectedChannel = ch; singleChannelView = true },
                                 onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
                                 snapshotTrigger = snapshotTrigger,
                                 isRecording = isRecording,
@@ -506,13 +592,16 @@ fun LiveScreen(
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    LiveNavItem(Icons.Default.Alarm, "Events", {})
+                    LiveNavItem(Icons.Default.Alarm, "Events", { showEventsScreen = true })
                     MicHoldButton(
                         host = talkHost,
                         port = talkPort,
-                        username = viewModel.credentials?.username ?: "admin",
+                        username = viewModel.credentials?.username.orEmpty().ifBlank { "admin" },
                         password = viewModel.credentials?.password ?: "",
                         channel = selectedChannel,
+                        onError = { msg ->
+                            coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+                        },
                     )
                     LiveNavItem(Icons.Default.Star, "Presets", { showPresets = !showPresets }, selected = showPresets)
                     LiveNavItem(Icons.Default.MoreHoriz, "More", { showMoreSheet = true })
@@ -662,6 +751,7 @@ private fun LiveChannelGrid(
     audioMuted: Boolean,
     viewModel: NvrViewModel,
     onChannelTap: (Int) -> Unit,
+    onDoubleTap: ((Int) -> Unit)? = null,
     onThumbnail: ((Bitmap) -> Unit)? = null,
     snapshotTrigger: Int = 0,
     isRecording: Boolean = false,
@@ -766,8 +856,8 @@ private fun LiveChannelGrid(
                                     onTap = { onChannelTap(ch.id) },
                                     onDoubleTap = {
                                         onChannelTap(ch.id)
-                                        overlayChannel = ch.id
-                                        overlayScale = 1f
+                                        if (onDoubleTap != null) onDoubleTap(ch.id)
+                                        else { overlayChannel = ch.id; overlayScale = 1f }
                                     },
                                     onThumbnail = { bmp -> viewModel.setChannelThumbnail(ch.id, bmp) },
                                     snapshotTrigger = if (ch.id == selectedChannel) snapshotTrigger else 0,
@@ -1353,6 +1443,7 @@ private fun LiveBottomBar(
     showPresets: Boolean,
     onPresetsToggle: () -> Unit,
     onMore: () -> Unit,
+    onTalkError: ((String) -> Unit)? = null,
 ) {
     Surface(
         tonalElevation = 3.dp,
@@ -1371,9 +1462,10 @@ private fun LiveBottomBar(
             MicHoldButton(
                 host = talkHost,
                 port = talkPort,
-                username = creds?.username ?: "admin",
+                username = creds?.username.orEmpty().ifBlank { "admin" },
                 password = creds?.password ?: "",
                 channel = selectedChannel,
+                onError = onTalkError,
             )
             LiveNavItem(Icons.Default.Star, "Presets", onPresetsToggle, selected = showPresets)
             LiveNavItem(Icons.Default.MoreHoriz, "More", onMore)
@@ -1407,6 +1499,7 @@ private fun MicHoldButton(
     username: String,
     password: String,
     channel: Int,
+    onError: ((String) -> Unit)? = null,
 ) {
     val ctx = LocalContext.current
     var pressed by remember { mutableStateOf(false) }
@@ -1490,7 +1583,7 @@ private fun MicHoldButton(
                                         }.apply { isDaemon = true; start() }
                                         recordThread.value = t
                                     },
-                                    onError = { /* stop silently on error */ },
+                                    onError = { msg -> pressed = false; onError?.invoke(msg) },
                                 )
                                 talkClient.value = client
                                 client.start()

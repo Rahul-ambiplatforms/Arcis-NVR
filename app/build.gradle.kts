@@ -50,7 +50,11 @@ android {
     }
 
     buildTypes {
-        debug {}
+        debug {
+            // Sign debug builds with the release key so they install over the production
+            // app without needing to uninstall first (avoids INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+            signingConfig = signingConfigs.getByName("release")
+        }
         release {
             signingConfig  = signingConfigs.getByName("release")
             isMinifyEnabled = false

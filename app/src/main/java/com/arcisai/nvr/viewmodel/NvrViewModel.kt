@@ -268,10 +268,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 if (!saved.remote) {
-                    // LAN: credentials are enough — no network call needed for navigation.
-                    credentials = saved
-                    api = NetSdkApi(saved)
-                    startDestination = "main"
+                    // LAN login has been removed. Discard stale LAN creds and show login.
+                    store.clear()
+                    startDestination = "login"
                 } else {
                     // Cloud: check the persisted cookie — no network round-trip needed.
                     // Accessing cloudApi initialises PersistentCookieStore from SharedPreferences.
@@ -1749,10 +1748,18 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         alarmJob?.cancel()
         cameraAlarmActive = true
         alarmJob = viewModelScope.launch {
-            runCatching { api?.triggerIpcAlarm(channelId, durationSec) }   // camera speaker
-            runCatching { api?.triggerSiren(durationSec) }                    // NVR buzzer too
+            // R/SoundManCtrl = confirmed vendor-app siren endpoint
+            runCatching { api?.triggerSiren(durationSec) }
+                .onSuccess { android.util.Log.d("Alarm", "R/SoundManCtrl ON → $it") }
+                .onFailure { android.util.Log.e("Alarm", "R/SoundManCtrl failed: ${it.message}") }
+            // Camera-side alarm light (white flash + speaker if available)
+            runCatching { api?.triggerAlarmLight(channelId, durationSec) }
+                .onSuccess { android.util.Log.d("Alarm", "R/AlarmLightManCtrl → $it") }
+                .onFailure { android.util.Log.e("Alarm", "R/AlarmLightManCtrl failed: ${it.message}") }
             kotlinx.coroutines.delay(durationSec * 1_000L)
-            runCatching { api?.stopIpcAlarm(channelId) }
+            runCatching { api?.stopSiren() }
+                .onSuccess { android.util.Log.d("Alarm", "R/SoundManCtrl OFF → $it") }
+            runCatching { api?.stopAlarmLight() }
             cameraAlarmActive = false
         }
     }
@@ -1760,8 +1767,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     fun stopCameraAlarm(channelId: Int) {
         alarmJob?.cancel()
         viewModelScope.launch {
-            runCatching { api?.stopIpcAlarm(channelId) }
             runCatching { api?.stopSiren() }
+                .onSuccess { android.util.Log.d("Alarm", "R/SoundManCtrl OFF → $it") }
+            runCatching { api?.stopAlarmLight() }
         }
         cameraAlarmActive = false
     }

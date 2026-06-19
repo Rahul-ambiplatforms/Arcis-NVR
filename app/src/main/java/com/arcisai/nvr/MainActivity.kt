@@ -91,11 +91,6 @@ class MainActivity : ComponentActivity() {
                             } else {
                                 LoginScreen(
                                     vm = viewModel,
-                                    onLanConnected = {
-                                        rootNav.navigate("main") {
-                                            popUpTo("login") { inclusive = true }
-                                        }
-                                    },
                                     onCloudAuthenticated = {
                                         rootNav.navigate("my_nvrs") {
                                             popUpTo("login") { inclusive = true }

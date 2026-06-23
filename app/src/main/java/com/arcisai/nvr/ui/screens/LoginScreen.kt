@@ -25,18 +25,33 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arcisai.nvr.R
+import com.arcisai.nvr.data.NvrCredentials
 import com.arcisai.nvr.ui.theme.AccentPurple
 import com.arcisai.nvr.ui.theme.loginGradient
 import com.arcisai.nvr.viewmodel.NvrViewModel
 
+/**
+ * Cloud (Arcis account) login only.
+ *
+ * LAN direct-connect code is preserved in the block below and can be
+ * re-enabled by removing this file and restoring LoginScreen_LanBackup.kt.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
     vm: NvrViewModel,
+    onLanConnected: () -> Unit,       // kept for nav graph compatibility; not used here
     onCloudAuthenticated: () -> Unit,
 ) {
-    var email  by remember { mutableStateOf("") }
-    var pwd    by remember { mutableStateOf("") }
-    var pwdVis by remember { mutableStateOf(false) }
+    var remote     by remember { mutableStateOf(true) }
+    var email      by remember { mutableStateOf("") }
+    var pwd        by remember { mutableStateOf("") }
+    var pwdVis     by remember { mutableStateOf(false) }
+    var host       by remember { mutableStateOf("") }
+    var port       by remember { mutableStateOf("") }
+    var lanUser    by remember { mutableStateOf("") }
+    var lanPass    by remember { mutableStateOf("") }
+    var lanPassVis by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier.fillMaxSize().background(loginGradient()),
@@ -63,38 +78,89 @@ fun LoginScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(
-                        "Login",
+                        if (remote) "Sign in" else "LAN Connect",
                         fontWeight = FontWeight.SemiBold, fontSize = 18.sp,
                     )
+                    SegmentedTabs(
+                        items = listOf("Cloud", "LAN"),
+                        selectedIndex = if (remote) 0 else 1,
+                        onSelect = { remote = it == 0 },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Text(
-                        "Use your Arcis account. After signing in you'll see every NVR linked to your account.",
+                        if (remote)
+                            "Use your Arcis account. After signing in you'll see every NVR linked to your account."
+                        else
+                            "Connect directly to your NVR on the local network.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
-                    OutlinedTextField(
-                        value = email, onValueChange = { email = it.trim() },
-                        label = { Text("Email") }, singleLine = true,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    )
-                    OutlinedTextField(
-                        value = pwd, onValueChange = { pwd = it },
-                        label = { Text("Password") }, singleLine = true,
-                        visualTransformation = if (pwdVis) VisualTransformation.None else PasswordVisualTransformation(),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        trailingIcon = {
-                            IconButton(onClick = { pwdVis = !pwdVis }) {
-                                Icon(
-                                    imageVector = if (pwdVis) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                    contentDescription = if (pwdVis) "Hide password" else "Show password",
-                                )
-                            }
-                        },
-                    )
+                    if (remote) {
+                        OutlinedTextField(
+                            value = email, onValueChange = { email = it.trim() },
+                            label = { Text("Email") }, singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        )
+                        OutlinedTextField(
+                            value = pwd, onValueChange = { pwd = it },
+                            label = { Text("Password") }, singleLine = true,
+                            visualTransformation = if (pwdVis) VisualTransformation.None else PasswordVisualTransformation(),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            trailingIcon = {
+                                IconButton(onClick = { pwdVis = !pwdVis }) {
+                                    Icon(
+                                        imageVector = if (pwdVis) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = if (pwdVis) "Hide password" else "Show password",
+                                    )
+                                }
+                            },
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = host, onValueChange = { host = it.trim() },
+                            label = { Text("NVR IP address") }, singleLine = true,
+                            placeholder = { Text("e.g. 192.168.1.1") },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        )
+                        OutlinedTextField(
+                            value = port, onValueChange = { port = it.filter(Char::isDigit) },
+                            label = { Text("HTTP port") }, singleLine = true,
+                            placeholder = { Text("e.g. 80 or 8080") },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        )
+                        OutlinedTextField(
+                            value = lanUser, onValueChange = { lanUser = it },
+                            label = { Text("Username") }, singleLine = true,
+                            placeholder = { Text("admin") },
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = lanPass, onValueChange = { lanPass = it },
+                            label = { Text("Password") }, singleLine = true,
+                            visualTransformation = if (lanPassVis) VisualTransformation.None else PasswordVisualTransformation(),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            trailingIcon = {
+                                IconButton(onClick = { lanPassVis = !lanPassVis }) {
+                                    Icon(
+                                        imageVector = if (lanPassVis) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = null,
+                                    )
+                                }
+                            },
+                        )
+                    }
 
                     vm.loginStatus?.let {
                         Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
@@ -105,8 +171,21 @@ fun LoginScreen(
 
                     Spacer(Modifier.height(4.dp))
                     Button(
-                        onClick = { vm.accountLogin(email, pwd, onCloudAuthenticated) },
-                        enabled = !vm.loginBusy && email.isNotBlank() && pwd.isNotBlank(),
+                        onClick = {
+                            if (remote) {
+                                vm.accountLogin(email, pwd, onCloudAuthenticated)
+                            } else {
+                                val p = port.toIntOrNull() ?: 80
+                                vm.login(
+                                    NvrCredentials(host = host, port = p, username = lanUser, password = lanPass, remote = false),
+                                    onLanConnected,
+                                )
+                            }
+                        },
+                        enabled = !vm.loginBusy && (
+                            if (remote) email.isNotBlank() && pwd.isNotBlank()
+                            else lanUser.isNotBlank() && host.isNotBlank()
+                        ),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth().height(52.dp),
                     ) {
@@ -117,7 +196,10 @@ fun LoginScreen(
                                 color = MaterialTheme.colorScheme.onPrimary,
                             )
                         } else {
-                            Text("Login", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                            Text(
+                                if (remote) "Sign in" else "Connect",
+                                fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
+                            )
                         }
                     }
                 }
@@ -152,3 +234,24 @@ private fun BrandHeader() {
         )
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SegmentedTabs(
+    items: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    SingleChoiceSegmentedButtonRow(modifier = modifier) {
+        items.forEachIndexed { i, label ->
+            SegmentedButton(
+                selected = i == selectedIndex,
+                onClick = { onSelect(i) },
+                shape = SegmentedButtonDefaults.itemShape(index = i, count = items.size),
+                label = { Text(label) },
+            )
+        }
+    }
+}
+

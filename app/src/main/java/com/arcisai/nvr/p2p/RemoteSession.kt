@@ -72,8 +72,8 @@ class RemoteSession(
             override fun onStateChanged(state: Int) {
                 Log.i(tag, "[$serviceId] state=$state")
                 when (state) {
-                    3, 4 -> if (!stateConnected.isCompleted) stateConnected.complete(true)  // CONNECTED, COMPLETED
-                    5    -> if (!stateConnected.isCompleted) stateConnected.complete(false) // FAILED
+                    3, 4 -> if (!stateConnected.isCompleted) stateConnected.complete(true)
+                    5    -> if (!stateConnected.isCompleted) stateConnected.complete(false)
                 }
             }
             override fun onRecv(data: ByteArray) {
@@ -96,20 +96,23 @@ class RemoteSession(
             }
         }
 
+        // Use the same STUN approach as the NVR provider: stun.l.google.com:19302 for
+        // srflx candidate discovery (responds in <1 s), no TURN relay (provider doesn't
+        // have it either). NAT hole-punching via srflx candidates is the live P2P path.
         val a = JuiceAgent(
             listener = listener,
-            stunHost = cfg.turnHost, stunPort = cfg.turnPort,
-            turnHost = cfg.turnHost, turnPort = cfg.turnPort,
-            turnUser = cfg.turnUser, turnPass = cfg.turnPass,
+            stunHost = "stun.l.google.com", stunPort = 19302,
+            turnHost = null, turnPort = 3478,
+            turnUser = null, turnPass = null,
         )
         agent = a
         a.gatherCandidates()
 
-        // Wait for gathering — 4 s is enough on typical networks (was 8 s).
-        val gathered = withTimeoutOrNull(4_000) { gatheredDone.await() } != null
+        // Google STUN responds in <1 s on any reachable network; 3 s is a safe ceiling.
+        // On timeout we still proceed — host candidates alone may work on LAN.
+        val gathered = withTimeoutOrNull(3_000) { gatheredDone.await() } != null
         if (!gathered) {
-            Log.w(tag, "[$serviceId] gathering timeout")
-            return finishConnect(false)
+            Log.w(tag, "[$serviceId] gathering timeout — proceeding with available candidates")
         }
 
         val localSdp = a.localDescription
@@ -130,15 +133,26 @@ class RemoteSession(
         }
         Log.i(tag, "[$serviceId] match ok provSdp[0..200]=${resp.providerSdp.take(200)} cands=${resp.candidates.size}")
 
-        // Pass the full SDP (with a=candidate lines inline) in one shot — same
-        // pattern as consumer_api.c. juice_set_remote_description handles the
-        // candidates internally; trickle-style juice_add_remote_candidate is
-        // for incremental ICE which the in-house protocol doesn't use.
-        a.remoteDescription = resp.providerSdp
+        // If the provider SDP has only host candidates (STUN gathering not yet
+        // complete on the NVR side), synthesize an srflx candidate from the
+        // provider_ip field.  The NVR uses port-preserving NAT so the public
+        // address is provider_ip:same_port as the host candidate.
+        val remoteSdp = if (!resp.providerSdp.contains("typ srflx") && resp.providerIp.isNotBlank()) {
+            val hostLine = resp.providerSdp.lineSequence().firstOrNull { it.contains("typ host") }
+            val hostPort = hostLine?.let {
+                Regex("(\\d+) typ host").find(it)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            }
+            if (hostPort != null) {
+                val syntheticSrflx = "a=candidate:99 1 UDP 1678769919 ${resp.providerIp} $hostPort typ srflx raddr 0.0.0.0 rport 0"
+                Log.i(tag, "[$serviceId] injecting synthetic srflx: $syntheticSrflx")
+                resp.providerSdp + "\n$syntheticSrflx"
+            } else resp.providerSdp
+        } else resp.providerSdp
+
+        a.remoteDescription = remoteSdp
         a.setRemoteGatheringDone()
 
-        // Wait for ICE — 12 s covers most relay paths (was 20 s).
-        val ok = withTimeoutOrNull(12_000) { stateConnected.await() } ?: false
+        val ok = withTimeoutOrNull(15_000) { stateConnected.await() } ?: false
         Log.i(tag, "[$serviceId] connected=$ok")
         if (!ok) return finishConnect(false)
         connected.set(true)
@@ -245,9 +259,6 @@ class RemoteSession(
             Log.i(tag, "[$serviceId] send chunk #$idx conn=$connId seq=$seq total=$length off=$offset len=$chunkLen rc=$rc ascii='${preview}'")
             if (rc < 0) return false
             offset += chunkLen; idx++
-            if (offset < length) {
-                try { Thread.sleep(0, 150_000) } catch (_: Throwable) {}
-            }
         }
         return true
     }

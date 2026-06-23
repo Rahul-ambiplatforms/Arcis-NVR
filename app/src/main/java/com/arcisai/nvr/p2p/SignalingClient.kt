@@ -38,6 +38,7 @@ class SignalingClient(
         val providerSdp: String,
         val candidates: List<String>,
         val sessionId: String,
+        val providerIp: String,
         val raw: String,
     )
 
@@ -70,7 +71,7 @@ class SignalingClient(
                 val respLen = inp.readInt()
                 if (respLen <= 0 || respLen > 1_000_000) {
                     Log.e(tag, "match invalid respLen=$respLen")
-                    return@use MatchResponse(false, "", emptyList(), "", "invalid response length")
+                    return@use MatchResponse(false, "", emptyList(), "", "", "invalid response length")
                 }
                 val respBytes = ByteArray(respLen)
                 inp.readFully(respBytes)
@@ -80,7 +81,7 @@ class SignalingClient(
             }
         } catch (t: Throwable) {
             Log.e(tag, "match threw ${t.javaClass.simpleName}: ${t.message}", t)
-            MatchResponse(false, "", emptyList(), "", "exception: ${t.message ?: t.javaClass.simpleName}")
+            MatchResponse(false, "", emptyList(), "", "", "exception: ${t.message ?: t.javaClass.simpleName}")
         }
     }
 
@@ -92,11 +93,12 @@ class SignalingClient(
         // We pass the full SDP (with candidates inline) to libjuice, matching
         // the in-house consumer_api.c flow.
         val sdp = extractField(resp, "provider_sdp").trim()
-        if (sdp.isBlank()) return MatchResponse(false, "", emptyList(), "", resp)
+        if (sdp.isBlank()) return MatchResponse(false, "", emptyList(), "", "", resp)
         val candCount = sdp.lineSequence().count { it.trim().startsWith("a=candidate:") }
         val sid = extractField(resp, "session_id")
-        Log.i(tag, "match parsed sdpLen=${sdp.length} candidateLines=$candCount sid=$sid")
-        return MatchResponse(true, sdp, emptyList(), sid, resp)
+        val provIp = extractField(resp, "provider_ip").trim()
+        Log.i(tag, "match parsed sdpLen=${sdp.length} candidateLines=$candCount sid=$sid provIp=$provIp")
+        return MatchResponse(true, sdp, emptyList(), sid, provIp, resp)
     }
 
     /**

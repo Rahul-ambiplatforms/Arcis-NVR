@@ -16,12 +16,14 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * Two-way audio talkback over the NVR's IOT WebSocket (port 10000).
  *
- * Protocol (confirmed from com.juanvision.eseecloud30 vendor app analysis):
- *   ARQ open → IOT OPEN → AES-128 AUTH → immediately send VOP2P FRAM frames
+ * Protocol (reverse-engineered from NVR firmware JS and libJAVideo.so analysis):
+ *   ARQ open → IOT OPEN → AES-128 AUTH → VOP2P_REQ(CALL, channel) → VOP2P_RSP → send FRAM frames
  *
- * The vendor app's JAP2PConnector2::talkSend calls ja_p2p_vop2p_talk_send directly —
- * no VCON handshake, no LIVE_REQ. VOP2P FRAM frames (headtype=2) are injected straight
- * after AUTH, with the channel embedded in the p2p_frame_head.
+ * Command table (from NVR JS):
+ *   APP_PROTO_CMD_VOP2P_REQ=60, APP_PROTO_CMD_VOP2P_RSP=61
+ *   APP_PROTO_PARAM_VOP2P_CMD_CALL=1, APP_PROTO_PARAM_VOP2P_CMD_HANGUP=2
+ *
+ * VOP2P FRAM frames use headtype=2 with G.711 A-law audio at 8 kHz mono.
  */
 class WsTalkbackClient(
     private val host: String,
@@ -45,7 +47,7 @@ class WsTalkbackClient(
     private var pingThread: Thread? = null
     private var vop2pSeq = 0
 
-    private enum class St { OPENING, IOT, AUTH, READY }
+    private enum class St { OPENING, IOT, AUTH, VOP2P_CALL, READY }
 
     fun start() {
         Log.d(TAG, "start() host=$host port=$port channel=$channel user='$username'")
@@ -55,6 +57,12 @@ class WsTalkbackClient(
 
     fun sendAudio(g711: ByteArray) {
         if (state != St.READY || closed.get() || g711.isEmpty()) return
+        if (vop2pSeq % 100 == 0) {
+            // A-law: 0xD5/0x55=silence, values far from those = audible signal
+            val max = g711.maxOf { it.toInt() and 0xFF }
+            val min = g711.minOf { it.toInt() and 0xFF }
+            Log.d(TAG, "sendAudio seq=$vop2pSeq size=${g711.size} max=$max min=$min enc=alaw ch=$channel")
+        }
         runCatching { sendVop2pFrame(g711) }
     }
 
@@ -62,6 +70,9 @@ class WsTalkbackClient(
         if (!closed.compareAndSet(false, true)) return
         Log.d(TAG, "stop() state=$state")
         pingThread?.interrupt()
+        if (state == St.READY) {
+            runCatching { sendApi(VOP2P_REQ, vop2pPayload(VOP2P_CMD_HANGUP)) }
+        }
         runCatching { ws?.close(1000, null) }
         runCatching { client.dispatcher.executorService.shutdown() }
     }
@@ -130,11 +141,20 @@ class WsTalkbackClient(
         }
     }
 
+    // ── VOP2P handshake payload ───────────────────────────────────────────────
+
+    /** vop2p_req payload: channel(4LE) + vop2p_cmd(4LE) */
+    private fun vop2pPayload(vop2pCmd: Int): ByteArray {
+        val b = ByteArray(8)
+        le32(channel).copyInto(b, 0)
+        le32(vop2pCmd).copyInto(b, 4)
+        return b
+    }
+
     // ── VOP2P audio frame ─────────────────────────────────────────────────────
 
     /**
      * Build a FRAM media frame with headtype=2 (VOP2P) containing G.711 A-law audio.
-     * Confirmed as the mechanism used by ja_p2p_vop2p_talk_send in libJAVideo.so.
      *
      * Frame layout (all LE):
      *   p2p_frame_head (24): magic(MARF) + headtype(2) + channel + data_size + frame_no + timestamp
@@ -157,13 +177,13 @@ class WsTalkbackClient(
         le32(vop2pSeq++).copyInto(frame, pos); pos += 4
         le32(0).copyInto(frame, pos); pos += 4      // timestamp
 
-        // live_head (8 bytes): frametype=0 (audio)
-        le32(0).copyInto(frame, pos); pos += 4
-        le32(0).copyInto(frame, pos); pos += 4
+        // live_head (8 bytes): frametype=0 (audio), channel
+        le32(0).copyInto(frame, pos); pos += 4        // frametype = 0 (audio)
+        le32(channel).copyInto(frame, pos); pos += 4  // channel (same as p2p_frame_head.channel)
 
-        // audio_param (24 bytes)
+        // audio_param (24 bytes) — confirmed by NVR webUI: sampleWidth=16, G711.alawdecode → enc=1
         le32(8000).copyInto(frame, pos); pos += 4   // samplerate
-        le32(16).copyInto(frame, pos); pos += 4     // samplewidth
+        le32(16).copyInto(frame, pos); pos += 4     // samplewidth = 16-bit PCM input width
         le32(1).copyInto(frame, pos); pos += 4      // enc = 1 (G.711 A-law)
         le32(1).copyInto(frame, pos); pos += 4      // channels = 1 (mono)
         le32(g711.size).copyInto(frame, pos); pos += 4
@@ -231,27 +251,38 @@ class WsTalkbackClient(
         if (b.size < 56) return
 
         val inner = b.copyOfRange(32, b.size)
-        if (inner.size < 4) return
+        if (inner.size < 24) return
 
         val m0 = inner[0].toInt() and 0xff
         val m1 = inner[1].toInt() and 0xff
         val m2 = inner[2].toInt() and 0xff
         val m3 = inner[3].toInt() and 0xff
-
         if (m0 != 0x50 || m1 != 0x32 || m2 != 0x50 || m3 != 0x4B) return
-        if (inner.size < 24) return
+
         val apiCmd = u32(inner, 12)
         val result  = u32(inner, 16)
         Log.d(TAG, "P2PK apiCmd=$apiCmd result=$result")
 
-        if (apiCmd == AUTH_RSP) {
-            if (result == 0) {
-                Log.d(TAG, "AUTH OK → VOP2P READY channel=$channel")
-                state = St.READY
-                startPing()
-                onReady()
-            } else {
-                onError("Auth failed (code $result)")
+        when (apiCmd) {
+            AUTH_RSP -> {
+                if (result == 0) {
+                    Log.d(TAG, "AUTH OK → VOP2P_REQ CALL channel=$channel")
+                    state = St.VOP2P_CALL
+                    sendApi(VOP2P_REQ, vop2pPayload(VOP2P_CMD_CALL))
+                } else {
+                    onError("Auth failed (code $result)")
+                }
+            }
+            VOP2P_RSP -> {
+                Log.d(TAG, "VOP2P_RSP result=$result")
+                if (result == 0) {
+                    Log.d(TAG, "VOP2P CALL OK → READY channel=$channel")
+                    state = St.READY
+                    startPing()
+                    onReady()
+                } else {
+                    onError("VOP2P call failed (code $result)")
+                }
             }
         }
     }
@@ -282,24 +313,30 @@ class WsTalkbackClient(
         private const val IOT_DATA_PRIOR = 43
         private const val AUTH_REQ       = 10
         private const val AUTH_RSP       = 11
+        private const val VOP2P_REQ      = 60
+        private const val VOP2P_RSP      = 61
+        private const val VOP2P_CMD_CALL   = 1
+        private const val VOP2P_CMD_HANGUP = 2
 
         /** G.711 A-law encoder (ITU-T G.711). Converts 16-bit PCM → 8-bit A-law. */
         fun pcm16ToAlaw(sample: Short): Byte {
-            var ix = sample.toInt()
+            var s = sample.toInt()
             val mask: Int
-            if (ix >= 0) { ix = ix shr 4; mask = 0xD5 }
-            else         { ix = ix.inv() shr 4; mask = 0x55 }
-            val exp = when {
-                ix >= 1024 -> { ix = ix shr 6; 7 }
-                ix >= 512  -> { ix = ix shr 5; 6 }
-                ix >= 256  -> { ix = ix shr 4; 5 }
-                ix >= 128  -> { ix = ix shr 3; 4 }
-                ix >= 64   -> { ix = ix shr 2; 3 }
-                ix >= 32   -> { ix = ix shr 1; 2 }
-                ix >= 16   -> 1
-                else       -> 0
+            if (s >= 0) { mask = 0xD5 }
+            else        { mask = 0x55; s = s.inv() }
+            val seg: Int
+            val mantissa: Int
+            when {
+                s >= 0x4000 -> { seg = 7; mantissa = (s ushr 7) and 0x0F }
+                s >= 0x2000 -> { seg = 6; mantissa = (s ushr 6) and 0x0F }
+                s >= 0x1000 -> { seg = 5; mantissa = (s ushr 5) and 0x0F }
+                s >= 0x0800 -> { seg = 4; mantissa = (s ushr 4) and 0x0F }
+                s >= 0x0400 -> { seg = 3; mantissa = (s ushr 3) and 0x0F }
+                s >= 0x0200 -> { seg = 2; mantissa = (s ushr 2) and 0x0F }
+                s >= 0x0100 -> { seg = 1; mantissa = (s ushr 1) and 0x0F }
+                else        -> { seg = 0; mantissa =  s          and 0x0F }
             }
-            return (((exp shl 4) or (ix and 0x0F)) xor mask).toByte()
+            return (((seg shl 4) or mantissa) xor mask).toByte()
         }
     }
 }

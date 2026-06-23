@@ -72,8 +72,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import com.arcisai.nvr.data.NvrCredentials
+import com.arcisai.nvr.net.CameraWsChatClient
 import com.arcisai.nvr.net.WsAudioListenClient
-import com.arcisai.nvr.net.WsTalkbackClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -181,11 +181,11 @@ fun LiveScreen(
     var fetchExhausted by remember(selectedChannel, useSub, boundIp) { mutableStateOf(false) }
     val remoteMode = viewModel.credentials?.remote == true
 
-    // Talkback endpoint — in LAN mode use credentials directly; in remote mode
-    // open (or reuse) the replay P2P tunnel which proxies port 10000.
-    var talkHost by remember { mutableStateOf(viewModel.credentials?.host ?: "") }
+    // Audio-listen endpoint — NVR WebSocket :10000 (LAN direct, or replay P2P tunnel in cloud).
+    // In P2P mode start empty so we never attempt the unreachable NVR-IP before the tunnel opens.
+    var talkHost by remember { mutableStateOf(if (remoteMode) "" else viewModel.credentials?.host ?: "") }
     var talkPort by remember { mutableIntStateOf(10000) }
-    LaunchedEffect(remoteMode) {
+    LaunchedEffect(remoteMode, selectedChannel, viewModel.reconnectToken) {
         if (remoteMode) {
             val ep = viewModel.replayEndpoint()
             if (ep != null) { talkHost = ep.first; talkPort = ep.second }
@@ -195,28 +195,36 @@ fun LiveScreen(
         }
     }
 
+    // Chat/talkback endpoint — NVR HTTP:80 proxy to camera (LAN) or main P2P tunnel (cloud).
+    // Both modes use the same CameraWsChatClient with Host=cameraIp so the NVR routes correctly.
+    var chatHost by remember { mutableStateOf("") }
+    var chatPort by remember { mutableIntStateOf(80) }
+    var chatCamIp by remember { mutableStateOf("") }
+    LaunchedEffect(remoteMode, selectedChannel, viewModel.reconnectToken) {
+        val ep = viewModel.chatEndpoint(selectedChannel)
+        if (ep != null) { chatHost = ep.first; chatPort = ep.second; chatCamIp = ep.third }
+        else { chatHost = ""; chatCamIp = "" }
+    }
+
     // Audio listen — start/stop WsAudioListenClient when user toggles the speaker.
-    // Uses the same talkHost/talkPort as the talkback button (LAN or P2P tunnel).
+    // Always stop+restart on any key change: prevents a stale failed client from blocking
+    // the correct one when talkHost changes from "" → "127.0.0.1:tunnelPort" in P2P mode.
     val audioListenClient = remember { mutableStateOf<WsAudioListenClient?>(null) }
     LaunchedEffect(audioMuted, selectedChannel, talkHost, talkPort) {
-        val cur = audioListenClient.value
+        audioListenClient.value?.stop()
+        audioListenClient.value = null
         if (!audioMuted && talkHost.isNotBlank()) {
-            if (cur == null) {
-                val wsUser = viewModel.credentials?.username.orEmpty().ifBlank { "admin" }
-                val wsPass = viewModel.credentials?.password ?: ""
-                val c = WsAudioListenClient(
-                    host = talkHost, port = talkPort,
-                    username = wsUser, password = wsPass,
-                    channel = selectedChannel,
-                    onReady = {},
-                    onError = { /* swallow silently — audio is optional */ },
-                )
-                audioListenClient.value = c
-                c.start()
-            }
-        } else {
-            cur?.stop()
-            audioListenClient.value = null
+            val wsUser = viewModel.credentials?.username.orEmpty().ifBlank { "admin" }
+            val wsPass = viewModel.credentials?.password ?: ""
+            val c = WsAudioListenClient(
+                host = talkHost, port = talkPort,
+                username = wsUser, password = wsPass,
+                channel = selectedChannel,
+                onReady = {},
+                onError = { android.util.Log.w("AudioListen", "audio error: $it") },
+            )
+            audioListenClient.value = c
+            c.start()
         }
     }
     DisposableEffect(Unit) {
@@ -247,10 +255,10 @@ fun LiveScreen(
                 .first { it }
         }
         var attempts = 0
-        while (rtsp == null && attempts < 3) {
+        while (rtsp == null && attempts < 5) {
             attempts++
             rtsp = viewModel.ensureChannelStreamUrl(selectedChannel, stream = if (useSub) 1 else 0)
-            if (rtsp == null && attempts < 3) kotlinx.coroutines.delay(1_500L * attempts)
+            if (rtsp == null && attempts < 5) kotlinx.coroutines.delay(2_000L * attempts)
         }
         if (rtsp == null) fetchExhausted = true
     }
@@ -373,8 +381,9 @@ fun LiveScreen(
                 LiveBottomBar(
                     selectedChannel = selectedChannel,
                     creds = viewModel.credentials,
-                    talkHost = talkHost,
-                    talkPort = talkPort,
+                    chatHost = chatHost,
+                    chatPort = chatPort,
+                    chatCamIp = chatCamIp,
                     onDevice = onBack ?: {},
                     onEvents = { showEventsScreen = true },
                     showPresets = showPresets,
@@ -594,11 +603,11 @@ fun LiveScreen(
                 ) {
                     LiveNavItem(Icons.Default.Alarm, "Events", { showEventsScreen = true })
                     MicHoldButton(
-                        host = talkHost,
-                        port = talkPort,
+                        chatHost = chatHost,
+                        chatPort = chatPort,
+                        chatCamIp = chatCamIp,
                         username = viewModel.credentials?.username.orEmpty().ifBlank { "admin" },
                         password = viewModel.credentials?.password ?: "",
-                        channel = selectedChannel,
                         onError = { msg ->
                             coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
                         },
@@ -692,15 +701,15 @@ private fun ChannelContent(
                 if (fetchExhausted) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            if (remoteMode) "P2P Unavailable" else "Playback Error",
+                            if (remoteMode) "Connection Failed" else "Camera Unavailable",
                             color = Color.White, fontWeight = FontWeight.SemiBold,
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
                             if (remoteMode)
-                                "Could not open P2P tunnel.\nCheck NVR status or try again."
+                                "Could not connect to the NVR.\nCheck your internet and try again."
                             else
-                                "Network error. Try again later.",
+                                "Check the camera is powered on\nand connected to the network.",
                             color = Color.White.copy(alpha = 0.75f),
                             fontSize = 12.sp,
                             textAlign = TextAlign.Center,
@@ -716,7 +725,7 @@ private fun ChannelContent(
                         CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
                         Spacer(Modifier.height(10.dp))
                         Text(
-                            if (remoteMode) "Opening P2P tunnel…" else "Connecting…",
+                            "Loading stream…",
                             color = Color.White,
                         )
                     }
@@ -1436,8 +1445,9 @@ private fun PresetsSheet(
 private fun LiveBottomBar(
     selectedChannel: Int,
     creds: NvrCredentials?,
-    talkHost: String = creds?.host ?: "",
-    talkPort: Int = 10000,
+    chatHost: String = "",
+    chatPort: Int = 80,
+    chatCamIp: String = "",
     onDevice: () -> Unit,
     onEvents: () -> Unit,
     showPresets: Boolean,
@@ -1460,11 +1470,11 @@ private fun LiveBottomBar(
             LiveNavItem(Icons.Default.Videocam, "Device", onDevice)
             LiveNavItem(Icons.Default.Alarm, "Events", onEvents)
             MicHoldButton(
-                host = talkHost,
-                port = talkPort,
+                chatHost = chatHost,
+                chatPort = chatPort,
+                chatCamIp = chatCamIp,
                 username = creds?.username.orEmpty().ifBlank { "admin" },
                 password = creds?.password ?: "",
-                channel = selectedChannel,
                 onError = onTalkError,
             )
             LiveNavItem(Icons.Default.Star, "Presets", onPresetsToggle, selected = showPresets)
@@ -1494,11 +1504,14 @@ private fun LiveNavItem(
 
 @Composable
 private fun MicHoldButton(
-    host: String,
-    port: Int,
+    /** NVR connection host: NVR-IP on LAN, 127.0.0.1 (main P2P session) on cloud. */
+    chatHost: String,
+    /** NVR connection port: 80 on LAN, main-session tunnel port on cloud. */
+    chatPort: Int,
+    /** Camera IP sent as Host header so the NVR's HTTP proxy routes to the right camera. */
+    chatCamIp: String,
     username: String,
     password: String,
-    channel: Int,
     onError: ((String) -> Unit)? = null,
 ) {
     val ctx = LocalContext.current
@@ -1514,16 +1527,17 @@ private fun MicHoldButton(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasPermission = granted }
 
-    // Hold refs stable across recompositions; mutated from OkHttp + gesture threads.
-    val talkClient = remember { mutableStateOf<WsTalkbackClient?>(null) }
+    val sendFn = remember { mutableStateOf<((ByteArray) -> Unit)?>(null) }
+    val stopFn = remember { mutableStateOf<(() -> Unit)?>(null) }
     val recordThread = remember { mutableStateOf<Thread?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
             recordThread.value?.interrupt()
             recordThread.value = null
-            talkClient.value?.stop()
-            talkClient.value = null
+            stopFn.value?.invoke()
+            stopFn.value = null
+            sendFn.value = null
         }
     }
 
@@ -1536,7 +1550,7 @@ private fun MicHoldButton(
             .size(40.dp)
             .clip(CircleShape)
             .background(if (pressed) Color(0xFF1565C0) else Color(0xFF1E88E5))
-            .pointerInput(host, channel) {
+            .pointerInput(chatHost, chatCamIp) {
                 awaitPointerEventScope {
                     while (true) {
                         val down = awaitPointerEvent()
@@ -1544,48 +1558,66 @@ private fun MicHoldButton(
                             pressed = true
                             if (!hasPermission) {
                                 permLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            } else if (host.isNotBlank()) {
-                                val client = WsTalkbackClient(
-                                    host = host, port = port,
-                                    username = username, password = password,
-                                    channel = channel,
-                                    onReady = talkback@{
-                                        val sampleRate = 8000
-                                        val minBuf = AudioRecord.getMinBufferSize(
-                                            sampleRate,
-                                            AudioFormat.CHANNEL_IN_MONO,
-                                            AudioFormat.ENCODING_PCM_16BIT,
-                                        )
-                                        val ar = AudioRecord(
-                                            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                                            sampleRate,
-                                            AudioFormat.CHANNEL_IN_MONO,
-                                            AudioFormat.ENCODING_PCM_16BIT,
-                                            maxOf(minBuf, 640),
-                                        )
-                                        val pcmBuf = ShortArray(160)  // 20 ms at 8 kHz
-                                        ar.startRecording()
-                                        val t = Thread {
-                                            try {
-                                                while (!Thread.interrupted()) {
-                                                    val n = ar.read(pcmBuf, 0, pcmBuf.size)
-                                                    if (n > 0) {
-                                                        val g711 = ByteArray(n) {
-                                                            WsTalkbackClient.pcm16ToAlaw(pcmBuf[it])
-                                                        }
-                                                        talkClient.value?.sendAudio(g711)
+                            } else if (chatHost.isNotBlank()) {
+                                // LAN:   chatHost=NVR-IP, chatPort=80, chatCamIp=camera-IP
+                                // Cloud: chatHost=127.0.0.1, chatPort=main-tunnel, chatCamIp=camera-IP
+                                // Both connect through the NVR's HTTP proxy at /cgi-bin/Chat.
+                                val onReady: () -> Unit = {
+                                    val sampleRate = 8000
+                                    val minBuf = AudioRecord.getMinBufferSize(
+                                        sampleRate,
+                                        AudioFormat.CHANNEL_IN_MONO,
+                                        AudioFormat.ENCODING_PCM_16BIT,
+                                    )
+                                    val ar = AudioRecord(
+                                        MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                                        sampleRate,
+                                        AudioFormat.CHANNEL_IN_MONO,
+                                        AudioFormat.ENCODING_PCM_16BIT,
+                                        maxOf(minBuf, 640),
+                                    )
+                                    val pcmBuf = ShortArray(160)
+                                    ar.startRecording()
+                                    val t = Thread {
+                                        try {
+                                            while (!Thread.interrupted()) {
+                                                val n = ar.read(pcmBuf, 0, pcmBuf.size)
+                                                if (n > 0) {
+                                                    val g711 = ByteArray(n) {
+                                                        CameraWsChatClient.pcm16ToAlaw(pcmBuf[it])
                                                     }
+                                                    sendFn.value?.invoke(g711)
                                                 }
-                                            } finally {
-                                                ar.stop()
-                                                ar.release()
                                             }
-                                        }.apply { isDaemon = true; start() }
-                                        recordThread.value = t
-                                    },
-                                    onError = { msg -> pressed = false; onError?.invoke(msg) },
+                                        } finally {
+                                            ar.stop()
+                                            ar.release()
+                                        }
+                                    }.apply { isDaemon = true; start() }
+                                    recordThread.value = t
+                                }
+                                val onErr: (String) -> Unit = { msg ->
+                                    val friendly = when {
+                                        msg.contains("Auth", ignoreCase = true) ->
+                                            "Authentication failed"
+                                        msg.contains("connect", ignoreCase = true) ||
+                                            msg.contains("refused", ignoreCase = true) ||
+                                            msg.contains("reach", ignoreCase = true) ->
+                                            "Couldn't reach camera"
+                                        msg.contains("closed") || msg.contains("Closed") ->
+                                            "Connection lost"
+                                        else -> "Two-way audio unavailable"
+                                    }
+                                    pressed = false; onError?.invoke(friendly)
+                                }
+                                val client = CameraWsChatClient(
+                                    host = chatHost, port = chatPort,
+                                    username = username, password = password,
+                                    cameraHost = chatCamIp.ifBlank { chatHost },
+                                    onReady = onReady, onError = onErr,
                                 )
-                                talkClient.value = client
+                                sendFn.value = { g711 -> client.sendAudio(g711) }
+                                stopFn.value = { client.stop() }
                                 client.start()
                             }
                             // Hold until finger lifts
@@ -1593,8 +1625,9 @@ private fun MicHoldButton(
                             pressed = false
                             recordThread.value?.interrupt()
                             recordThread.value = null
-                            talkClient.value?.stop()
-                            talkClient.value = null
+                            stopFn.value?.invoke()
+                            stopFn.value = null
+                            sendFn.value = null
                         }
                     }
                 }
@@ -1779,10 +1812,9 @@ private fun VlcRtspPlayer(
         while (isActive) { delay(1_000); recordingElapsed++ }
     }
 
-    // Apply mute state whenever it changes
-    LaunchedEffect(audioMuted) {
-        player.volume = if (audioMuted) 0 else 100
-    }
+    // VLC handles video only — audio comes from WsAudioListenClient (NVR WebSocket :10000).
+    // Keeping VLC always muted avoids dual-audio conflict when both would play simultaneously.
+    LaunchedEffect(Unit) { player.volume = 0 }
 
     // Snapshot: capture current frame and save to gallery
     LaunchedEffect(snapshotTrigger) {
@@ -1980,7 +2012,7 @@ private fun VlcRtspPlayer(
                 retryEpoch++    // triggers a new media-setup LaunchedEffect
             } else {
                 error = if (isRemote)
-                    "Stream timed out. Camera may be offline or the relay IPs need updating."
+                    "Camera is offline or unreachable."
                 else
                     "Stream unavailable. Check SD / HD or your connection."
             }

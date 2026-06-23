@@ -30,6 +30,7 @@ import com.arcisai.nvr.net.PublisherApi
 import com.arcisai.nvr.net.PtzClient
 import com.arcisai.nvr.net.RtspTlsProxy
 import com.arcisai.nvr.net.SubnetSweep
+import com.arcisai.nvr.net.CameraWsChatClient
 import com.arcisai.nvr.net.WsReplayClient
 import com.arcisai.nvr.p2p.RemoteConfig
 import com.arcisai.nvr.p2p.RemoteSession
@@ -122,6 +123,12 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     // list is shown, so by the time the user taps a device ICE is often done.
     private val prewarmSessions = ConcurrentHashMap<String, RemoteSession>()
     private val prewarmJobs    = ConcurrentHashMap<String, Job>()
+
+    // These caches are used inside `attemptReconnectMain` which can run during init
+    // (Dispatchers.Main.immediate runs inline), so they must be declared BEFORE the
+    // init blocks to guarantee they are initialized when first accessed.
+    private val onvifUrlCache  = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /** Called from MyNvrsScreen when the device list loads.
      *  Quietly connects to up to 4 NVRs so [login] can skip ICE entirely. */
@@ -225,6 +232,22 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             api = NetSdkApi(tunnelCreds)
             android.util.Log.i("NvrViewModel", "attemptReconnectMain: ok, new port=${ns.localPort}")
             nvrOnline = true
+            reconnectToken++  // replay tunnel was torn down → talkback endpoint needs refresh
+            // Pre-warm pub + RTSP + replay tunnels in parallel so LiveScreen finds them ready
+            // the moment streamRefreshToken fires. Without this, each ICE handshake would
+            // happen sequentially inside ensureChannelStreamUrl, adding 5-15 s per tunnel.
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val ch = selectedLiveChannel
+                    kotlinx.coroutines.coroutineScope {
+                        launch { ensurePublisherTunnel() }
+                        launch { ensureChannelRtspTunnel(ch) }
+                        launch { replayEndpoint() }
+                    }
+                } finally {
+                    streamRefreshToken++  // tunnels ready → tell LiveScreen to reload VLC
+                }
+            }
             refreshChannels()
             loadIpCamInfo()
             loadConnectedChannels()
@@ -268,9 +291,10 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     return@launch
                 }
                 if (!saved.remote) {
-                    // LAN login has been removed. Discard stale LAN creds and show login.
-                    store.clear()
-                    startDestination = "login"
+                    // LAN: credentials are enough — no network call needed for navigation.
+                    credentials = saved
+                    api = NetSdkApi(saved)
+                    startDestination = "main"
                 } else {
                     // Cloud: check the persisted cookie — no network round-trip needed.
                     // Accessing cloudApi initialises PersistentCookieStore from SharedPreferences.
@@ -306,10 +330,15 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 if (creds.remote) {
                     // Fast path: use a pre-warmed session if one is ready.
+                    // If prewarm is still in flight, wait for it rather than
+                    // racing a second connect() against it (two simultaneous
+                    // ICE agents for the same service interfere with each other).
+                    val prewarmJob = prewarmJobs.remove(creds.deviceId)
+                    if (prewarmJob != null) prewarmJob.join()
                     val prewarmed = prewarmSessions.remove(creds.deviceId)
                     if (prewarmed?.isAlive == true) {
                         try {
-                            remoteStatus = "Connecting…"
+                            remoteStatus = "Connecting to NVR…"
                             val a = NetSdkApi(creds.copy(host = "127.0.0.1", port = prewarmed.localPort))
                             a.network()  // sanity probe through the pre-warmed tunnel
                             sessions[creds.deviceId] = prewarmed
@@ -317,7 +346,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                             credentials = creds
                             api = a
                             sessionOnlineIds = sessionOnlineIds + creds.deviceId
-                            remoteStatus = "Connected via P2P"
+                            remoteStatus = "Connected"
                             loadOrdinary()
                             onSuccess()
                             return@launch
@@ -333,11 +362,11 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     var connected = false
                     var lastErr: String? = null
                     for (attempt in 1..3) {
-                        remoteStatus = if (attempt == 1) "Opening P2P tunnel…"
-                                       else "Reconnecting P2P… ($attempt/3)"
+                        remoteStatus = if (attempt == 1) "Connecting to NVR…"
+                                       else "Reconnecting… ($attempt/3)"
                         val session = RemoteSession(creds.deviceId, remoteConfig)
                         if (!session.connect()) {
-                            session.close(); lastErr = "signaling/ICE failed"
+                            session.close(); lastErr = "connection failed"
                         } else {
                             try {
                                 val a = NetSdkApi(creds.copy(host = "127.0.0.1", port = session.localPort))
@@ -347,7 +376,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                                 credentials = creds
                                 api = a
                                 sessionOnlineIds = sessionOnlineIds + creds.deviceId
-                                remoteStatus = "Connected via P2P"
+                                remoteStatus = "Connected"
                                 loadOrdinary()
                                 onSuccess()
                                 connected = true
@@ -361,7 +390,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (!connected) {
                         remoteStatus = null
-                        loginStatus = "Could not reach NVR via P2P: ${lastErr ?: "timeout"}"
+                        loginStatus = "NVR is offline or unreachable"
                     }
                 } else {
                     val a = NetSdkApi(creds)
@@ -429,6 +458,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         discovered.clear()
         discoveryMisses.clear()
         searchResults = null
+        connectedChannels = null
+        channelStatus = emptyMap()
+        lastConnectedMs = 0L
     }
 
     // ---- Arcis cloud (Remote-mode account flow) --------------------------
@@ -660,15 +692,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
      *
      * `stream` follows the publisher's convention: 1=sub, 0=main.
      */
-    // Cache ONVIF-resolved RTSP URLs for this session so the 1.5 s TCP probe
-    // + SOAP round-trip only happen once per channel per stream type.
-    // Key: "$channelId-$stream". Cleared on logout / NVR switch.
-    private val onvifUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    // Cache fully-resolved RTSP URLs (including tunnel rewrite) so re-entering
-    // the live page returns the URL instantly without a publisher HTTP round-trip.
-    // Key: "$channelId-$stream". Invalidated on logout / session rebuild.
-    private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    // onvifUrlCache and streamUrlCache are declared near the top of the class
+    // (before the init blocks) to prevent NPE from Dispatchers.Main.immediate
+    // running attemptReconnectMain inline during class initialization.
 
     suspend fun ensureChannelStreamUrl(channelId: Int, stream: Int = 1): String? {
         val creds = credentials ?: return null
@@ -1278,7 +1304,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 //    "online" for ONVIF cams the NVR recorder rejects.
                 runCatching {
                     publisher()?.channels("sub")?.forEach { ch ->
-                        if (ch.enabled && ch.url.isNotBlank() && ch.error.isBlank() && ch.codec.isNotBlank())
+                        // N1/template cameras never populate codec — URL present + no error
+                        // is sufficient to treat a channel as streamable/online.
+                        if (ch.enabled && ch.url.isNotBlank() && ch.error.isBlank())
                             onlineSet.add(ch.channel)
                     }
                     connectedChannels = onlineSet.toSet()
@@ -1739,36 +1767,92 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ── Camera alarm (NVR hardware output) ───────────────────────────────────
+    // ── Camera alarm ─────────────────────────────────────────────────────────
     var cameraAlarmActive by mutableStateOf(false)
         private set
     private var alarmJob: Job? = null
+    private var alarmChatClient: CameraWsChatClient? = null
+
+    /**
+     * Returns the (connHost, connPort, cameraIp) triplet needed to open a /cgi-bin/Chat
+     * WebSocket through the NVR's HTTP server.
+     *
+     * LAN  → (NVR-IP, 80, camera-IP)  — connect direct to NVR HTTP:80
+     * Cloud→ (127.0.0.1, main-tunnel-port, camera-IP)  — connect via the existing main P2P
+     *         session (ABD-xxx-RYNA) which already tunnels NVR port 80
+     *
+     * The NVR's HTTP server proxies /cgi-bin/Chat to the camera whose IP matches the Host header.
+     */
+    fun chatEndpoint(channelId: Int): Triple<String, Int, String>? {
+        val creds = credentials ?: return null
+        val cameraIp = channels.firstOrNull { it.id == channelId }?.ipAddr.orEmpty()
+        return if (!creds.remote) {
+            Triple(creds.host, 80, cameraIp)
+        } else {
+            val port = sessions[creds.deviceId]?.takeIf { it.isAlive }?.localPort ?: return null
+            Triple("127.0.0.1", port, cameraIp)
+        }
+    }
 
     fun triggerCameraAlarm(channelId: Int, durationSec: Int = 10) {
         alarmJob?.cancel()
+        alarmChatClient?.stop(); alarmChatClient = null
+
         cameraAlarmActive = true
-        alarmJob = viewModelScope.launch {
-            // R/SoundManCtrl = confirmed vendor-app siren endpoint
-            runCatching { api?.triggerSiren(durationSec) }
-                .onSuccess { android.util.Log.d("Alarm", "R/SoundManCtrl ON → $it") }
-                .onFailure { android.util.Log.e("Alarm", "R/SoundManCtrl failed: ${it.message}") }
-            // Camera-side alarm light (white flash + speaker if available)
-            runCatching { api?.triggerAlarmLight(channelId, durationSec) }
-                .onSuccess { android.util.Log.d("Alarm", "R/AlarmLightManCtrl → $it") }
-                .onFailure { android.util.Log.e("Alarm", "R/AlarmLightManCtrl failed: ${it.message}") }
-            kotlinx.coroutines.delay(durationSec * 1_000L)
-            runCatching { api?.stopSiren() }
-                .onSuccess { android.util.Log.d("Alarm", "R/SoundManCtrl OFF → $it") }
-            runCatching { api?.stopAlarmLight() }
-            cameraAlarmActive = false
+        alarmJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val user = credentials?.username.orEmpty().ifBlank { "admin" }
+            val pass = credentials?.password ?: ""
+            val ep = chatEndpoint(channelId)
+
+            if (ep == null || ep.first.isBlank()) {
+                // No Chat endpoint available — fall back to NVR HTTP alarm trigger.
+                runCatching { api?.triggerSiren(channelId, durationSec) }
+                kotlinx.coroutines.delay(durationSec * 1_000L)
+                cameraAlarmActive = false
+                return@launch
+            }
+
+            val tone = CameraWsChatClient.readWavAssetToAlaw(getApplication(), "siren.wav")
+            var chatDone = false
+            val chatClient = CameraWsChatClient(
+                host = ep.first, port = ep.second,
+                username = user, password = pass,
+                cameraHost = ep.third,
+                onReady = {
+                    viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        var offset = 0
+                        while (offset < tone.size && cameraAlarmActive) {
+                            val end = minOf(offset + 160, tone.size)
+                            alarmChatClient?.sendAudio(tone.copyOfRange(offset, end))
+                            offset = end
+                            kotlinx.coroutines.delay(20)
+                        }
+                        chatDone = true
+                        alarmChatClient?.stop(); alarmChatClient = null
+                        cameraAlarmActive = false
+                    }
+                },
+                onError = {
+                    if (!chatDone) {
+                        chatDone = true
+                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            runCatching { api?.triggerSiren(channelId, durationSec) }
+                            kotlinx.coroutines.delay(durationSec * 1_000L)
+                            cameraAlarmActive = false
+                        }
+                    }
+                },
+            )
+            alarmChatClient = chatClient
+            chatClient.start()
         }
     }
 
     fun stopCameraAlarm(channelId: Int) {
         alarmJob?.cancel()
+        alarmChatClient?.stop(); alarmChatClient = null
         viewModelScope.launch {
             runCatching { api?.stopSiren() }
-                .onSuccess { android.util.Log.d("Alarm", "R/SoundManCtrl OFF → $it") }
             runCatching { api?.stopAlarmLight() }
         }
         cameraAlarmActive = false
@@ -1846,8 +1930,14 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         launchSave({ api?.setStream(updated) }, "OSD saved") { loadOsd() }
 
     /** Bumped after any settings change that causes the camera to restart its
-     *  RTSP stream (IR cut mode, encoding). LiveScreen observes this to reconnect VLC. */
+     *  RTSP stream (IR cut mode, encoding). LiveScreen observes this to reconnect VLC.
+     *  Also bumped on P2P reconnect so the live screen re-fetches the tunnel URL. */
     var streamRefreshToken by mutableStateOf(0)
+        private set
+
+    /** Bumped on every successful P2P reconnect. LiveScreen observes this to re-fetch
+     *  the talkback/audio-listen endpoint (replay tunnel port changes on reconnect). */
+    var reconnectToken by mutableStateOf(0)
         private set
 
     fun saveIrcutMode(channelId: Int, mode: String) {
@@ -1869,13 +1959,60 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Siren / buzzer -------------------------------------------------------
     var sirenActive by mutableStateOf(false)
         private set
+    private var sirenChatClient: CameraWsChatClient? = null
 
-    fun triggerSiren() {
-        val a = api ?: run { settingStatus = "Not connected"; return }
+    fun triggerSiren(channelId: Int = 1) {
+        sirenChatClient?.stop(); sirenChatClient = null
+        sirenActive = true
+
+        val ep = chatEndpoint(channelId)
+        val user = credentials?.username.orEmpty().ifBlank { "admin" }
+        val pass = credentials?.password ?: ""
+        android.util.Log.d("Siren", "triggerSiren ch=$channelId ep=$ep user=$user")
+
+        if (ep != null && ep.third.isNotBlank()) {
+            // LAN + Cloud: stream siren.wav to camera speaker via NVR /cgi-bin/Chat proxy.
+            // LAN  → ws://NVR-IP:80/cgi-bin/Chat, Host: camera-IP
+            // Cloud → ws://127.0.0.1:tunnelPort/cgi-bin/Chat, Host: camera-IP
+            //   (main NVR P2P session already tunnels NVR HTTP:80; no per-channel P2P needed)
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                val tone = CameraWsChatClient.readWavAssetToAlaw(getApplication(), "siren.wav")
+                android.util.Log.d("Siren", "WAV ${tone.size}B → ws://${ep.first}:${ep.second}/cgi-bin/Chat cameraHost=${ep.third}")
+                val client = CameraWsChatClient(
+                    host = ep.first, port = ep.second,
+                    username = user, password = pass,
+                    cameraHost = ep.third,
+                    onReady = {
+                        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            var offset = 0
+                            while (offset < tone.size && sirenActive) {
+                                val end = minOf(offset + 160, tone.size)
+                                sirenChatClient?.sendAudio(tone.copyOfRange(offset, end))
+                                offset = end
+                                kotlinx.coroutines.delay(20)
+                            }
+                            android.util.Log.d("Siren", "Streaming done offset=$offset active=$sirenActive")
+                            sirenChatClient?.stop(); sirenChatClient = null
+                            sirenActive = false
+                        }
+                    },
+                    onError = { msg ->
+                        android.util.Log.e("Siren", "Chat error: $msg")
+                        sirenActive = false; sirenChatClient = null
+                    },
+                )
+                sirenChatClient = client
+                client.start()
+            }
+            return
+        }
+
+        // Fallback: NVR HTTP alarm trigger (no camera IP — channel not found or tunnel not alive)
+        android.util.Log.d("Siren", "No chat endpoint — falling back to NVR HTTP trigger ch=$channelId")
+        val a = api ?: run { settingStatus = "Not connected"; sirenActive = false; return }
         viewModelScope.launch {
             try {
-                a.triggerSiren(durationSec = 10)
-                sirenActive = true
+                a.triggerSiren(channelId, durationSec = 10)
                 settingStatus = "Siren triggered"
                 kotlinx.coroutines.delay(10_000)
                 sirenActive = false
@@ -1887,7 +2024,11 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopSiren() {
-        val a = api ?: return
+        // Stop direct camera chat client if active
+        sirenChatClient?.stop()
+        sirenChatClient = null
+
+        val a = api ?: run { sirenActive = false; return }
         viewModelScope.launch {
             runCatching { a.stopSiren() }
             sirenActive = false

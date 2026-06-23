@@ -101,6 +101,17 @@ class WsAudioListenClient(
         audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
     }
 
+    private fun playMulaw(data: ByteArray, offset: Int, len: Int) {
+        ensureAudioTrack()
+        val pcm = ByteArray(len * 2)
+        for (i in 0 until len) {
+            val s = mulawToPcm16(data[offset + i])
+            pcm[i * 2]     = (s.toInt() and 0xFF).toByte()
+            pcm[i * 2 + 1] = (s.toInt() ushr 8 and 0xFF).toByte()
+        }
+        audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+    }
+
     // ── byte helpers ──────────────────────────────────────────────────────────
 
     private fun le32(v: Int) = byteArrayOf(
@@ -268,7 +279,7 @@ class WsAudioListenClient(
         var pos = if (isFran) 40 else 0
         if (inner.size < pos + 24) return
 
-        val headtype = u32(inner, pos + 4)     // p2p_frame_head.headtype (offset 4, NOT 8)
+        val headtype = u32(inner, pos + 8)     // p2p_frame_head.headtype at bytes 8..11 (spec §5.1)
         pos += 24                               // skip p2p_frame_head (24 bytes)
 
         if (headtype != HEAD_TYPE_LIVE) {
@@ -282,16 +293,25 @@ class WsAudioListenClient(
 
         if (frametype != FRAME_TYPE_AUDIO) return  // only audio
 
-        // audio_param (24 bytes) + 8 reserved = 32 bytes total before audio data
+        // audio_param (24 bytes): enc[0..7] ASCII + samplerate[8..11] + samplewidth[12..15]
+        //                          + channels[16..19] + compress[20..23]
+        // +8 reserved bytes before body (same +8 gap as video — spec §5.5)
         if (inner.size < pos + 32) return
+        val paramBase = pos
+        val encStr = String(inner, paramBase, 8, Charsets.US_ASCII).trimEnd(' ')
+        val sampleRate = u32(inner, paramBase + 8)
         pos += 32
 
         if (pos >= inner.size) return
-        // Log enc/samplerate from audio_param so we know the camera's encoding value
-        val encVal = if (pos >= 40) u32(inner, pos - 32 + 8) else -1
-        val rateVal = if (pos >= 40) u32(inner, pos - 32) else -1
-        Log.d(TAG, "audio ${inner.size - pos} bytes  enc=$encVal sampleRate=$rateVal")
-        playAlaw(inner, pos, inner.size - pos)
+        val dataLen = inner.size - pos
+        Log.d(TAG, "audio ${dataLen}B enc='$encStr' sampleRate=$sampleRate")
+
+        when {
+            encStr.startsWith("G711A", ignoreCase = true) -> playAlaw(inner, pos, dataLen)
+            encStr.startsWith("G711U", ignoreCase = true) -> playMulaw(inner, pos, dataLen)
+            encStr.isEmpty() -> playAlaw(inner, pos, dataLen)  // pre-spec firmware: assume A-law
+            else -> Log.w(TAG, "Unsupported audio codec '$encStr' — skipping frame")
+        }
     }
 
     private fun startPing() {
@@ -326,6 +346,16 @@ class WsAudioListenClient(
         private const val LIVE_CMD_STOP  = 1
         private const val HEAD_TYPE_LIVE = 0
         private const val FRAME_TYPE_AUDIO = 0
+
+        /** ITU-T G.711 mu-law → linear PCM-16. */
+        fun mulawToPcm16(mulaw: Byte): Short {
+            val mu = (mulaw.toInt() and 0xFF) xor 0xFF
+            val sign = if ((mu and 0x80) != 0) 1 else -1
+            val exp = (mu and 0x70) ushr 4
+            val mantissa = mu and 0x0F
+            val magnitude = ((mantissa shl 3) + 0x84) shl exp
+            return (sign * (magnitude - 0x84)).toShort()
+        }
 
         /** ITU-T G.711 A-law → linear PCM-16. */
         fun alawToPcm16(alaw: Byte): Short {

@@ -175,28 +175,17 @@ class NetSdkApi(val creds: NvrCredentials) {
     // ------------------------------------------------------------------
     // Alarm / siren
     // ------------------------------------------------------------------
-    /**
-     * Trigger NVR/camera siren via R/SoundManCtrl (confirmed from vendor app com.juanvision.eseecloud30).
-     * Operate="ON", DurSec=duration (vendor app clamps 1–30 s).
-     */
-    suspend fun triggerSiren(durationSec: Int = 10): String =
-        put("/netsdk/R/SoundManCtrl",
-            JSONObject().put("Operate", "ON").put("DurSec", durationSec.coerceIn(1, 30)).toString())
+    // R.SoundManCtrl/R.AlarmLightManCtrl only accept GET (PUT → 404).
+    // R.Channel.TriggerAlarm accepts PUT, returns 200 "Save failure" (HDD absent) but triggers camera alarm.
+    suspend fun triggerSiren(channelId: Int, durationSec: Int = 10): String =
+        put("/netsdk/R.Channel.TriggerAlarm",
+            JSONObject().put("ID", channelId).toString())
 
-    /** Stop siren immediately. */
-    suspend fun stopSiren(): String =
-        put("/netsdk/R/SoundManCtrl",
-            JSONObject().put("Operate", "OFF").toString())
+    suspend fun stopSiren(): String = ""   // one-shot; camera stops after firmware timeout
 
-    /** Trigger camera-side alarm light (combined white-light + sound). */
-    suspend fun triggerAlarmLight(channelId: Int, durationSec: Int = 10): String =
-        put("/netsdk/R/AlarmLightManCtrl",
-            JSONObject().put("AlarmSound", true).put("AlarmWhiteLight", true)
-                .put("DurSec", durationSec.coerceIn(1, 30)).toString())
+    suspend fun triggerAlarmLight(channelId: Int, durationSec: Int = 10): String = ""
 
-    suspend fun stopAlarmLight(): String =
-        put("/netsdk/R/AlarmLightManCtrl",
-            JSONObject().put("AlarmSound", false).put("AlarmWhiteLight", false).toString())
+    suspend fun stopAlarmLight(): String = ""
 
     // ------------------------------------------------------------------
     // Setting > Event / Record schedule

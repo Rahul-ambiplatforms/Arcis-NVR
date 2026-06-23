@@ -206,7 +206,7 @@ private fun ConnectingDialog(name: String, status: String?) {
                 Column {
                     Text(name, fontWeight = FontWeight.SemiBold)
                     Text(
-                        status ?: "Opening P2P tunnel…",
+                        status ?: "Connecting to NVR…",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

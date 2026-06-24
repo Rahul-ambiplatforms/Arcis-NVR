@@ -41,9 +41,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile        = file("arcisai-release.jks")
-            storePassword    = "ArcisAI@2024"
-            keyAlias         = "arcisai"
-            keyPassword      = "ArcisAI@2024"
+            storePassword    = System.getenv("KEYSTORE_PASSWORD") ?: "ArcisAI@2024"
+            keyAlias         = System.getenv("KEY_ALIAS")         ?: "arcisai"
+            keyPassword      = System.getenv("KEY_PASSWORD")      ?: "ArcisAI@2024"
             enableV1Signing  = true
             enableV2Signing  = true
         }

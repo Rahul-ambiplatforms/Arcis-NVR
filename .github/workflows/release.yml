@@ -35,6 +35,9 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > app/arcisai-release.jks
+
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
         env:

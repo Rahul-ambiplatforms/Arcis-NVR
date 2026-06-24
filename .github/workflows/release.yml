@@ -69,22 +69,33 @@ jobs:
           APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
           mv "$APK" "app/build/outputs/apk/release/ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk"
 
+      - name: Extract release notes from tag annotation
+        id: notes
+        run: |
+          BODY=$(git tag -l --format='%(contents)' "${{ steps.tag.outputs.ref }}" | tail -n +3)
+          if [ -z "$BODY" ]; then
+            BODY="No release notes provided."
+          fi
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY"     >> $GITHUB_OUTPUT
+          echo "EOF"       >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.ref }}
           name: "ArcisAI NVR ${{ steps.tag.outputs.ref }}"
           body: |
-            ## ArcisAI NVR ${{ steps.tag.outputs.ref }}
+            ## What's changed
+            ${{ steps.notes.outputs.body }}
 
+            ---
             | Field        | Value |
             |-------------|-------|
             | Version Name | `${{ steps.ver.outputs.name }}` |
             | Version Code | `${{ steps.ver.outputs.code }}` |
-            | Build        | Release (signed) |
 
-            ### Installation
-            Download and install `ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk`.
+            **Installation:** download and install `ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk`
           files: app/build/outputs/apk/release/ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk
           draft: false
           prerelease: false

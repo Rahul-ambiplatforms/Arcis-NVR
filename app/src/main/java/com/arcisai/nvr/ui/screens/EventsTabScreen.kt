@@ -215,7 +215,11 @@ fun EventsTabScreen(
 
                 // ── Motion-only timeline ───────────────────────────────────────
                 if (creds != null && !vm.motionEventBusy && segments.isNotEmpty()) {
-                    RecordingTimeline(dayStartSec = dayStartSec, segments = segments) { tappedSec ->
+                    RecordingTimeline(
+                        dayStartSec = dayStartSec,
+                        segments    = segments,
+                        seekToSec   = play?.beginSec,
+                    ) { tappedSec ->
                         val containing = segments.firstOrNull { tappedSec in it.startSec..it.endSec }
                         val next = segments.filter { it.startSec >= tappedSec }
                             .minByOrNull { it.startSec }
@@ -242,9 +246,13 @@ fun EventsTabScreen(
                     vm.motionEventStatus != null -> EventNote(vm.motionEventStatus!!)
                     else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
                         items(segments) { s ->
+                            val isActive = play?.let { it.beginSec == s.startSec && it.channel == s.channel } == true
                             ListItem(
                                 headlineContent = {
-                                    Text("${utcTime(s.startSec)} – ${utcTime(s.endSec)}")
+                                    Text(
+                                        "${utcTime(s.startSec)} – ${utcTime(s.endSec)}",
+                                        fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                    )
                                 },
                                 supportingContent = {
                                     val secs = (s.endSec - s.startSec).coerceAtLeast(0)
@@ -255,9 +263,13 @@ fun EventsTabScreen(
                                     Icon(
                                         Icons.Default.DirectionsRun,
                                         contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
+                                        tint = if (isActive) MaterialTheme.colorScheme.error
+                                               else MaterialTheme.colorScheme.primary,
                                     )
                                 },
+                                colors = if (isActive) ListItemDefaults.colors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                                ) else ListItemDefaults.colors(),
                                 modifier = Modifier.clickable {
                                     play = EventPlayReq(s.channel, s.startSec, s.endSec)
                                 },

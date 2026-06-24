@@ -44,17 +44,29 @@ private data class PlayReq(val channel: Int, val beginSec: Long, val endSec: Lon
 @Composable
 fun PlaybackTabScreen(vm: NvrViewModel, onBack: (() -> Unit)? = null, onViewLive: (() -> Unit)? = null) {
     val creds = vm.credentials
-    // Pre-select whichever channel was highlighted in the LiveScreen grid.
-    var channel by remember { mutableStateOf(vm.selectedLiveChannel) }
-    var dayMillis  by remember { mutableStateOf(utcDayStart(localAsUtcNowMillis())) }
+    // Consume a pending request from EventsTabScreen navigation (channel + epoch).
+    // Read once at composition time, clear in LaunchedEffect so back+forward nav
+    // doesn't re-apply the same values.
+    val pendingCh    = vm.pendingPlaybackChannelId
+    val pendingEpoch = vm.pendingPlaybackEpochSec
+    var channel by remember { mutableStateOf(pendingCh ?: vm.selectedLiveChannel) }
+    var dayMillis  by remember { mutableStateOf(
+        pendingEpoch?.let { utcDayStart(it * 1000L) } ?: utcDayStart(localAsUtcNowMillis())
+    ) }
     var play       by remember { mutableStateOf<PlayReq?>(null) }
-    var seekTarget by remember { mutableStateOf<Long?>(null) }
+    var seekTarget by remember { mutableStateOf<Long?>(pendingEpoch) }
+
+    // Clear pending state after consuming so it doesn't persist across navigations.
+    LaunchedEffect(Unit) {
+        if (pendingCh    != null) vm.pendingPlaybackChannelId = null
+        if (pendingEpoch != null) vm.pendingPlaybackEpochSec  = null
+    }
 
     // Sync timeline to current local time when today is selected; reset on day change.
     LaunchedEffect(dayMillis) {
         val nowMillis = localAsUtcNowMillis()
         val isToday   = dayMillis == utcDayStart(nowMillis)
-        seekTarget    = if (isToday) nowMillis / 1000L else null
+        if (seekTarget == null) seekTarget = if (isToday) nowMillis / 1000L else null
     }
 
     // Per-channel playback. Recordings live on the NVR HDD per channel, so we

@@ -1,7 +1,6 @@
 package com.arcisai.nvr.net
 
 import android.content.Context
-import android.util.Base64
 import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -50,12 +49,13 @@ class CameraWsChatClient(
     @Volatile private var ready = false
 
     fun start() {
-        Log.d(TAG, "start() ws://$host:$port/cgi-bin/Chat cameraHost=$cameraHost user=$username")
-        val creds = Base64.encodeToString("$username:$password".toByteArray(), Base64.NO_WRAP)
+        Log.d(TAG, "start() ws://$host:$port/cgi-bin/Chat cameraHost=$cameraHost")
         val req = Request.Builder()
             .url("ws://$host:$port/cgi-bin/Chat")
-            .header("Host", cameraHost)          // Tells NVR which camera to proxy to
-            .header("Authorization", "Basic $creds")
+            // No Authorization — camera Chat endpoint is unauthenticated per firmware API.
+            // When routing via NVR relay (host != cameraHost), set Host to the camera's IP
+            // so the camera's HTTP server accepts the upgrade request.
+            .apply { if (cameraHost.isNotBlank() && cameraHost != host) header("Host", cameraHost) }
             .build()
         ws = client.newWebSocket(req, Listener())
     }
@@ -80,7 +80,7 @@ class CameraWsChatClient(
             onReady()
         }
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            // Camera may send far-end mic audio — ignore for now
+            Log.d(TAG, "camera→ ${bytes.size}B hex=${bytes.hex().take(16)}")
         }
         override fun onMessage(webSocket: WebSocket, text: String) {
             Log.d(TAG, "Chat server msg: $text")

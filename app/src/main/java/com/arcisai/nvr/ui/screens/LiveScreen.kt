@@ -74,6 +74,7 @@ import androidx.core.content.ContextCompat
 import com.arcisai.nvr.data.NvrCredentials
 import com.arcisai.nvr.net.CameraWsChatClient
 import com.arcisai.nvr.net.WsAudioListenClient
+import com.arcisai.nvr.net.WsTalkbackClient
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -195,12 +196,13 @@ fun LiveScreen(
         }
     }
 
-    // Chat/talkback endpoint — NVR HTTP:80 proxy to camera (LAN) or main P2P tunnel (cloud).
-    // Both modes use the same CameraWsChatClient with Host=cameraIp so the NVR routes correctly.
+    // Chat/talkback endpoint — NVR tcpsvd HTTP relay to camera (LAN) or P2P tunnel (cloud).
+    // LAN: chatHost=NVR-IP, chatPort=8540+ch, chatCamIp=camera-IP → relay → camera:80.
+    // P2P: chatHost=127.0.0.1, chatPort=tunnel, chatCamIp=camera-IP → tunnel → relay → camera:80.
     var chatHost by remember { mutableStateOf("") }
-    var chatPort by remember { mutableIntStateOf(80) }
+    var chatPort by remember { mutableIntStateOf(8541) }
     var chatCamIp by remember { mutableStateOf("") }
-    LaunchedEffect(remoteMode, selectedChannel, viewModel.reconnectToken) {
+    LaunchedEffect(remoteMode, selectedChannel, viewModel.reconnectToken, viewModel.channels) {
         val ep = viewModel.chatEndpoint(selectedChannel)
         if (ep != null) { chatHost = ep.first; chatPort = ep.second; chatCamIp = ep.third }
         else { chatHost = ""; chatCamIp = "" }
@@ -221,7 +223,10 @@ fun LiveScreen(
                 username = wsUser, password = wsPass,
                 channel = selectedChannel,
                 onReady = {},
-                onError = { android.util.Log.w("AudioListen", "audio error: $it") },
+                onError = { msg ->
+                    android.util.Log.w("AudioListen", "audio error: $msg")
+                    coroutineScope.launch { snackbarHostState.showSnackbar("Audio: $msg") }
+                },
             )
             audioListenClient.value = c
             c.start()
@@ -1504,11 +1509,11 @@ private fun LiveNavItem(
 
 @Composable
 private fun MicHoldButton(
-    /** NVR connection host: NVR-IP on LAN, 127.0.0.1 (main P2P session) on cloud. */
+    /** NVR relay host: NVR-IP on LAN, 127.0.0.1 (main P2P session) on cloud. */
     chatHost: String,
-    /** NVR connection port: 80 on LAN, main-session tunnel port on cloud. */
+    /** NVR relay port: 8540+channelId on LAN (tcpsvd → camera:80), main-session tunnel port on cloud. */
     chatPort: Int,
-    /** Camera IP sent as Host header so the NVR's HTTP proxy routes to the right camera. */
+    /** Camera IP used as Host header so the camera's HTTP server accepts the routed request. */
     chatCamIp: String,
     username: String,
     password: String,
@@ -1559,9 +1564,9 @@ private fun MicHoldButton(
                             if (!hasPermission) {
                                 permLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else if (chatHost.isNotBlank()) {
-                                // LAN:   chatHost=NVR-IP, chatPort=80, chatCamIp=camera-IP
-                                // Cloud: chatHost=127.0.0.1, chatPort=main-tunnel, chatCamIp=camera-IP
-                                // Both connect through the NVR's HTTP proxy at /cgi-bin/Chat.
+                                // LAN:   chatHost=NVR-IP,   chatPort=8540+ch,  chatCamIp=camera-IP
+                                // Cloud: chatHost=127.0.0.1, chatPort=h-tunnel, chatCamIp=camera-IP
+                                // Both route through NVR tcpsvd relay → camera:80 /cgi-bin/Chat.
                                 val onReady: () -> Unit = {
                                     val sampleRate = 8000
                                     val minBuf = AudioRecord.getMinBufferSize(
@@ -1583,8 +1588,14 @@ private fun MicHoldButton(
                                             while (!Thread.interrupted()) {
                                                 val n = ar.read(pcmBuf, 0, pcmBuf.size)
                                                 if (n > 0) {
-                                                    val g711 = ByteArray(n) {
-                                                        CameraWsChatClient.pcm16ToAlaw(pcmBuf[it])
+                                                    val g711 = ByteArray(n) { i ->
+                                                        // 4× gain: phone mic captures at ~−18 dBFS;
+                                                        // boost into G.711 upper amplitude range so
+                                                        // camera speaker plays at audible volume.
+                                                        val boosted = (pcmBuf[i].toInt() shl 2)
+                                                            .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                                                            .toShort()
+                                                        CameraWsChatClient.pcm16ToAlaw(boosted)
                                                     }
                                                     sendFn.value?.invoke(g711)
                                                 }
@@ -1598,12 +1609,18 @@ private fun MicHoldButton(
                                 }
                                 val onErr: (String) -> Unit = { msg ->
                                     val friendly = when {
-                                        msg.contains("Auth", ignoreCase = true) ->
+                                        msg.contains("Auth", ignoreCase = true) ||
+                                            msg.contains("401", ignoreCase = true) ||
+                                            msg.contains("403", ignoreCase = true) ->
                                             "Authentication failed"
+                                        msg.contains("101", ignoreCase = true) ||
+                                            msg.contains("202", ignoreCase = true) ||
+                                            msg.contains("Upgrade", ignoreCase = true) ->
+                                            "Connecting to camera, please try again"
                                         msg.contains("connect", ignoreCase = true) ||
                                             msg.contains("refused", ignoreCase = true) ||
                                             msg.contains("reach", ignoreCase = true) ->
-                                            "Couldn't reach camera"
+                                            "Couldn't reach camera, please try again"
                                         msg.contains("closed") || msg.contains("Closed") ->
                                             "Connection lost"
                                         else -> "Two-way audio unavailable"

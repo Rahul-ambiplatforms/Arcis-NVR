@@ -96,21 +96,20 @@ class RemoteSession(
             }
         }
 
-        // Use the same STUN approach as the NVR provider: stun.l.google.com:19302 for
-        // srflx candidate discovery (responds in <1 s), no TURN relay (provider doesn't
-        // have it either). NAT hole-punching via srflx candidates is the live P2P path.
+        // STUN for srflx + TURN relay for CGNAT/5G networks.
+        // TURN is on the signaling server (same host, already reachable from any network).
         val a = JuiceAgent(
             listener = listener,
             stunHost = "stun.l.google.com", stunPort = 19302,
-            turnHost = null, turnPort = 3478,
-            turnUser = null, turnPass = null,
+            turnHost = "142.93.223.221", turnPort = 3478,
+            turnUser = "p2pturn", turnPass = "642e420232d18e546a911956232e0666",
         )
         agent = a
         a.gatherCandidates()
 
-        // Google STUN responds in <1 s on any reachable network; 3 s is a safe ceiling.
-        // On timeout we still proceed — host candidates alone may work on LAN.
-        val gathered = withTimeoutOrNull(3_000) { gatheredDone.await() } != null
+        // STUN responds in <1 s; TURN relay allocation can take 3-5 s. Allow 8 s so
+        // the relay candidate (needed on CGNAT/5G networks) makes it into the SDP.
+        val gathered = withTimeoutOrNull(8_000) { gatheredDone.await() } != null
         if (!gathered) {
             Log.w(tag, "[$serviceId] gathering timeout — proceeding with available candidates")
         }

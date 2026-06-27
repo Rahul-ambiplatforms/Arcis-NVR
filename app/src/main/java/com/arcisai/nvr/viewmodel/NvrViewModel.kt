@@ -259,6 +259,15 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Clear the cached stream URL for [channelId] so the next
+     *  [ensureChannelStreamUrl] call re-resolves it from the publisher. */
+    fun clearStreamUrlCache(channelId: Int) {
+        streamUrlCache.remove("$channelId-0")
+        streamUrlCache.remove("$channelId-1")
+        onvifUrlCache.remove("$channelId-0")
+        onvifUrlCache.remove("$channelId-1")
+    }
+
     /** Manual "Retry now" — kicks an immediate reconnect attempt off the 5 s
      *  polling cadence (e.g. from the offline banner's Retry button). No-op in
      *  LAN mode or when already reconnecting (guarded inside). */
@@ -733,11 +742,16 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             val rtspPort = ensureChannelRtspTunnel(channelId) ?: return null
             rewriteUrlHost(resolved.url, "127.0.0.1", rtspPort)
         } else {
-            // LAN: try ONVIF GetStreamUri for cameras that support it (gets the exact
-            // path + creds directly from the camera). For non-ONVIF or unreachable cameras,
-            // fall back to the NVR's tcpsvd RTSP relay (5540+channelId → camera:554) so the
-            // stream works even when AP client isolation blocks direct phone→camera traffic.
+            // LAN URL resolution order (first non-null wins):
+            // 1) ONVIF GetStreamUri — exact path + creds direct from camera.
+            // 2) Publisher URL verbatim — the publisher already has the camera's direct
+            //    RTSP URL (with credentials). Use it if the camera is TCP-reachable
+            //    from the phone (same LAN, no AP client isolation). This avoids
+            //    the NVR relay and works even when relay ports aren't all configured.
+            // 3) NVR relay rewrite — last resort when camera is not directly reachable
+            //    (AP client isolation). Requires tcpsvd relay on 5540+channelId.
             onvifDirectStreamUrl(channelId, stream)
+                ?: lanDirectUrl(resolved.url)
                 ?: rewriteUrlHost(resolved.url, creds.host, 5540 + channelId)
         }
 
@@ -774,6 +788,18 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             try { java.net.Socket().use { it.connect(java.net.InetSocketAddress(host, port), timeoutMs) }; true }
             catch (_: Throwable) { false }
         }
+
+    /** Returns [url] unchanged if its embedded host:port is TCP-reachable within
+     *  600 ms (i.e. the camera is directly accessible on the same LAN).
+     *  Returns null otherwise so the caller falls back to the NVR relay. */
+    private suspend fun lanDirectUrl(url: String): String? {
+        return try {
+            val uri = java.net.URI(url)
+            val host = uri.host ?: return null
+            val port = if (uri.port > 0) uri.port else 554
+            if (tcpReachable(host, port, 600)) url else null
+        } catch (_: Throwable) { null }
+    }
 
     /** Open (or reuse) the per-channel RTSP libjuice tunnel. Returns its
      *  localhost port. Only valid in Remote mode. Mirrors the HTTP-tunnel

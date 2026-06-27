@@ -1,4 +1,4 @@
-﻿plugins {
+plugins {
     id("com.android.application")
     kotlin("android")
 }
@@ -11,7 +11,7 @@ android {
         applicationId = "com.arcisai.nvr"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
+        versionCode = 1
         versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -41,9 +41,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile        = file("arcisai-release.jks")
-            storePassword    = System.getenv("KEYSTORE_PASSWORD") ?: "ArcisAI@2024"
-            keyAlias         = System.getenv("KEY_ALIAS")         ?: "arcisai"
-            keyPassword      = System.getenv("KEY_PASSWORD")      ?: "ArcisAI@2024"
+            storePassword    = "ArcisAI@2024"
+            keyAlias         = "arcisai"
+            keyPassword      = "ArcisAI@2024"
             enableV1Signing  = true
             enableV2Signing  = true
         }
@@ -104,11 +104,11 @@ dependencies {
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.8.2")
 
-    // Networking â€” OkHttp w/ Basic auth (NetSdkApi + publisher).
+    // Networking — OkHttp w/ Basic auth (NetSdkApi + publisher).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // Retrofit + Gson for the Arcis cloud backend (auth/login, abd/addAbd, abd/getAbd).
-    // HTTP-only cookie session â€” same shape the production ArcisAI-Android app uses.
+    // HTTP-only cookie session — same shape the production ArcisAI-Android app uses.
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
@@ -116,12 +116,12 @@ dependencies {
     // Encrypted creds storage
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // Media3 (ExoPlayer) â€” kept for HLS / DASH / playback; RTSP swapped to libVLC
+    // Media3 (ExoPlayer) — kept for HLS / DASH / playback; RTSP swapped to libVLC
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-exoplayer-rtsp:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
 
-    // libVLC â€” RTSP player (Media3's RTSP rejects SDPs without fmtp; camera doesn't send it)
+    // libVLC — RTSP player (Media3's RTSP rejects SDPs without fmtp; camera doesn't send it)
     implementation("org.videolan.android:libvlc-all:3.6.5")
 
     // Coroutines

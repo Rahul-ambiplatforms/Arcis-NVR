@@ -922,8 +922,16 @@ private fun ChannelGridTile(
     val active = assigned && (online ?: ch.enabled) && !knownOffline
 
     var rtsp by remember(ch.id, ch.ipAddr, useSub) { mutableStateOf<String?>(null) }
+    // Set true when the URL fetch exhausts all attempts (publisher returned no URL).
+    // Set true when VLC exhausts all retries (RTSP stream unreachable).
+    // Both reset when the URL fetch restarts (gridRetryKey bumped) or on a new URL.
+    var fetchFailed   by remember(ch.id, ch.ipAddr, useSub) { mutableStateOf(false) }
+    var streamFailed  by remember(ch.id, ch.ipAddr, useSub) { mutableStateOf(false) }
+    var gridRetryKey  by remember(ch.id, ch.ipAddr, useSub) { mutableIntStateOf(0) }
 
-    LaunchedEffect(ch.id, ch.ipAddr, useSub) {
+    LaunchedEffect(ch.id, ch.ipAddr, useSub, gridRetryKey) {
+        fetchFailed  = false
+        streamFailed = false
         rtsp = null
         if (!assigned) return@LaunchedEffect
         // Wait reactively for the channel to be online (or status unknown = reachable).
@@ -938,14 +946,30 @@ private fun ChannelGridTile(
             rtsp = viewModel.ensureChannelStreamUrl(ch.id, stream = stream)
             if (rtsp == null && attempts < 3) delay(1_500L * attempts)
         }
+        if (rtsp == null) fetchFailed = true
     }
 
     // When the NVR definitively marks this channel offline after we already
     // started VLC, drop the URL so the "Offline" placeholder shows immediately
     // rather than waiting for the VLC watchdog to time out.
+    // When the channel recovers, auto-retry the URL fetch so the stream resumes
+    // without user interaction.
     LaunchedEffect(ch.id) {
+        var wasOffline = false
         snapshotFlow { viewModel.isChannelOffline(ch.id) }
-            .collect { isOffline -> if (isOffline) rtsp = null }
+            .collect { isOffline ->
+                if (isOffline) {
+                    rtsp = null
+                    wasOffline = true
+                } else if (wasOffline) {
+                    wasOffline = false
+                    // Channel came back online — clear any stale failure and retry.
+                    viewModel.clearStreamUrlCache(ch.id)
+                    fetchFailed  = false
+                    streamFailed = false
+                    gridRetryKey++
+                }
+            }
     }
 
     Box(
@@ -960,6 +984,7 @@ private fun ChannelGridTile(
             },
     ) {
         val url = rtsp
+        val anyFailed = fetchFailed || streamFailed
         if (url != null) {
             key(url, forceTcp) {
                 VlcRtspPlayer(
@@ -972,13 +997,17 @@ private fun ChannelGridTile(
                     isRecording = isRecording,
                     onRecordSaved = onRecordSaved,
                     startDelayMs = ch.id.toLong() * 600L,
+                    // Grid tiles: 1 silent retry at 7 s each = 14 s max before giving up.
+                    maxAutoRetries = 1,
+                    watchdogLanMs = 7_000L,
+                    onStreamExhausted = { streamFailed = true; rtsp = null },
                 )
             }
         } else {
             Box(
                 Modifier
                     .fillMaxSize()
-                    .background(if (active) Color(0xFF0E0A1E) else Color(0xFF111113)),
+                    .background(if (active && !anyFailed) Color(0xFF0E0A1E) else Color(0xFF111113)),
                 contentAlignment = Alignment.Center,
             ) {
                 Column(
@@ -986,7 +1015,7 @@ private fun ChannelGridTile(
                     verticalArrangement = Arrangement.Center,
                 ) {
                     Icon(
-                        if (active) Icons.Default.Videocam else Icons.Default.VideocamOff,
+                        if (active && !anyFailed) Icons.Default.Videocam else Icons.Default.VideocamOff,
                         null,
                         tint = Color.White.copy(alpha = 0.3f),
                         modifier = Modifier.size(20.dp),
@@ -997,6 +1026,7 @@ private fun ChannelGridTile(
                             !assigned    -> "No cam"
                             connecting   -> "Connecting…"
                             knownOffline -> "Offline"
+                            anyFailed    -> "No signal"
                             else         -> "Loading…"
                         },
                         fontSize = 9.sp,
@@ -1798,6 +1828,9 @@ private fun VlcRtspPlayer(
     isRecording: Boolean = false,
     onRecordSaved: ((String) -> Unit)? = null,
     startDelayMs: Long = 0,
+    maxAutoRetries: Int = 3,
+    watchdogLanMs: Long = 7_000L,
+    onStreamExhausted: (() -> Unit)? = null,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var retryEpoch  by remember(rtspUrl, forceTcp, isRemote) { mutableIntStateOf(0) }
@@ -2018,20 +2051,25 @@ private fun VlcRtspPlayer(
         }
     }
 
-    // Watchdog: auto-retry silently up to 3 times, then surface the error.
-    // P2P streams can take 20-30s to start — the user should never have to
-    // tap Retry unless all 3 attempts fail.
+    // Watchdog: auto-retry silently up to maxAutoRetries times, then surface
+    // the error (or call onStreamExhausted for grid tiles so the tile can show
+    // its own placeholder and skip VLC's internal error UI).
     LaunchedEffect(rtspUrl, forceTcp, isRemote, retryEpoch) {
-        delay(if (isRemote) 22_000L else 7_000L)
+        delay(if (isRemote) 22_000L else watchdogLanMs)
         if (!playing && error == null) {
-            if (autoRetries < 3) {
+            if (autoRetries < maxAutoRetries) {
                 autoRetries++   // persists across retryEpoch — resets only on URL change
                 retryEpoch++    // triggers a new media-setup LaunchedEffect
             } else {
-                error = if (isRemote)
-                    "Camera is offline or unreachable."
-                else
-                    "Stream unavailable. Check SD / HD or your connection."
+                if (onStreamExhausted != null) {
+                    // Grid tile: hand control back — tile shows its own placeholder.
+                    onStreamExhausted.invoke()
+                } else {
+                    error = if (isRemote)
+                        "Camera is offline or unreachable."
+                    else
+                        "Stream unavailable. Check SD / HD or your connection."
+                }
             }
         }
     }

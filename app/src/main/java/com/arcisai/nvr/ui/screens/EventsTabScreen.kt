@@ -7,6 +7,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -261,7 +262,7 @@ fun EventsTabScreen(
                                 },
                                 leadingContent = {
                                     Icon(
-                                        Icons.Default.DirectionsRun,
+                                        Icons.AutoMirrored.Filled.DirectionsRun,
                                         contentDescription = null,
                                         tint = if (isActive) MaterialTheme.colorScheme.error
                                                else MaterialTheme.colorScheme.primary,

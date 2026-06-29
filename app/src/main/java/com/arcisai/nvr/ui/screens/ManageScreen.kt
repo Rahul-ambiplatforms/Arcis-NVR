@@ -596,7 +596,7 @@ private fun EditIpcDialog(
                             readOnly = true,
                             label = { Text("Protocol") },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(protoOpen) },
-                            modifier = Modifier.fillMaxWidth().menuAnchor(),
+                            modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
                         )
                         ExposedDropdownMenu(
                             expanded = protoOpen,
@@ -716,7 +716,7 @@ private fun AddThirdPartyDialog(
                         readOnly = true,
                         label = { Text("Protocol") },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(protoOpen) },
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
                     )
                     ExposedDropdownMenu(
                         expanded = protoOpen,
@@ -800,7 +800,7 @@ private fun AddThirdPartyDialog(
                         readOnly = true,
                         label = { Text("Bind to channel") },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(slotOpen) },
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
                     )
                     ExposedDropdownMenu(
                         expanded = slotOpen,

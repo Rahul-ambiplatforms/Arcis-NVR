@@ -9,6 +9,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -44,6 +46,9 @@ fun ChannelSettingsScreen(
     var renameDraft  by remember { mutableStateOf("") }
     var showRename   by remember { mutableStateOf(false) }
     var showDelete   by remember { mutableStateOf(false) }
+    var audioGain    by remember(channelId) { mutableFloatStateOf(vm.channelAudioGain(channelId)) }
+    var gainDraft    by remember { mutableFloatStateOf(1.0f) }
+    var showVolumeDialog by remember { mutableStateOf(false) }
 
     val bg      = MaterialTheme.colorScheme.background
     val surface = MaterialTheme.colorScheme.surface
@@ -217,7 +222,7 @@ fun ChannelSettingsScreen(
             item {
                 ChGroup(surface) {
                     ChIconNavRow(
-                        icon    = Icons.Default.DirectionsRun,
+                        icon    = Icons.AutoMirrored.Filled.DirectionsRun,
                         iconBg  = Color(0xFFE53935),
                         title   = "Detection & Alerts",
                         subtitle = "Motion, human tracking & push notifications",
@@ -248,6 +253,16 @@ fun ChannelSettingsScreen(
                         subtitle = "Resolution and bitrate",
                         label   = label, chevron = chevron,
                         onClick = { onNavigate("channel-encode/$channelId") },
+                    )
+                    ChDividerRow(divClr)
+                    ChIconNavRow(
+                        icon    = Icons.AutoMirrored.Filled.VolumeUp,
+                        iconBg  = Color(0xFFE65100),
+                        title   = "Camera Audio Volume",
+                        subtitle = "Speaker volume for live audio",
+                        value   = "${(audioGain * 100).toInt()}%",
+                        label   = label, chevron = chevron,
+                        onClick = { gainDraft = audioGain; showVolumeDialog = true },
                     )
                 }
                 Spacer(Modifier.height(20.dp))
@@ -358,6 +373,52 @@ fun ChannelSettingsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // ── Audio Volume dialog ────────────────────────────────────────────────────
+    if (showVolumeDialog) {
+        AlertDialog(
+            onDismissRequest = { showVolumeDialog = false },
+            title = { Text("Camera Audio Volume") },
+            text = {
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        Text(
+                            "${(gainDraft * 100).toInt()}%",
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Slider(
+                        value = gainDraft,
+                        onValueChange = { gainDraft = it },
+                        valueRange = 0f..1f,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("0%", fontSize = 11.sp, color = label)
+                        Text("100%", fontSize = 11.sp, color = label)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    audioGain = gainDraft
+                    vm.setChannelAudioGain(channelId, gainDraft)
+                    showVolumeDialog = false
+                }) { Text("Apply") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showVolumeDialog = false }) { Text("Cancel") }
             },
         )
     }

@@ -99,9 +99,8 @@ private fun PerChannelEncodeContent(ch: JSONObject, onSave: () -> Unit) {
     val streams: JSONArray = ch.optJSONArray("Stream") ?: JSONArray()
 
     for (s in 0 until streams.length()) {
-        val stream     = streams.getJSONObject(s)
-        val streamName = stream.optString("Name", "Stream ${s + 1}")
-        val isMain     = s == 0
+        val stream = streams.getJSONObject(s)
+        val isMain = s == 0
 
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
@@ -208,8 +207,11 @@ private fun EncodingDropdown(
     options: List<String>,
     onPick: (String) -> Unit,
 ) {
+    // If the firmware reports a value not in our list, include it at the top so the
+    // field shows the real current value instead of going blank.
+    val displayOptions = if (value.isBlank() || value in options) options else listOf(value) + options
     var expanded by remember { mutableStateOf(false) }
-    var current  by remember(value) { mutableStateOf(value) }
+    var current  by remember(value) { mutableStateOf(value.ifBlank { options.firstOrNull() ?: "" }) }
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { expanded = !expanded },
@@ -227,7 +229,7 @@ private fun EncodingDropdown(
             colors        = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            options.forEach { opt ->
+            displayOptions.forEach { opt ->
                 DropdownMenuItem(
                     text    = { Text(opt) },
                     onClick = { current = opt; onPick(opt); expanded = false },

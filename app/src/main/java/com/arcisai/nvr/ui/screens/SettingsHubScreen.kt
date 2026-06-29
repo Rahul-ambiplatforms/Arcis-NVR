@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -36,7 +37,7 @@ fun SettingsHubScreen(
     onLogout: () -> Unit,
     onBack: (() -> Unit)? = null,
     onSwitchNvr: (() -> Unit)? = null,
-    currentNvrName: String? = null,
+    @Suppress("UNUSED_PARAMETER") currentNvrName: String? = null,
     accountEmail: String? = null,
     onChannelSettings: (Int) -> Unit = {},
     onAboutDevice: () -> Unit = {},
@@ -66,8 +67,7 @@ fun SettingsHubScreen(
         }
     }
 
-    val bg      = MaterialTheme.colorScheme.background
-    val surface = MaterialTheme.colorScheme.surface
+    val bg = MaterialTheme.colorScheme.background
 
     Scaffold(
         topBar = {
@@ -579,7 +579,7 @@ private fun VolumeDialog(
                 modifier = Modifier.padding(bottom = 24.dp))
 
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.VolumeDown, null,
+                Icon(Icons.AutoMirrored.Filled.VolumeDown, null,
                     tint     = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(22.dp))
                 Slider(

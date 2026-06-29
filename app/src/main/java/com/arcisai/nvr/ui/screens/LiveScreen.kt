@@ -222,6 +222,7 @@ fun LiveScreen(
                 host = talkHost, port = talkPort,
                 username = wsUser, password = wsPass,
                 channel = selectedChannel,
+                gain = viewModel.channelAudioGain(selectedChannel),
                 onReady = {},
                 onError = { msg ->
                     android.util.Log.w("AudioListen", "audio error: $msg")
@@ -384,11 +385,11 @@ fun LiveScreen(
         bottomBar = {
             if (!isTabRoot) {
                 LiveBottomBar(
-                    selectedChannel = selectedChannel,
                     creds = viewModel.credentials,
                     chatHost = chatHost,
                     chatPort = chatPort,
                     chatCamIp = chatCamIp,
+                    cameraProtocol = ch?.protocol.orEmpty(),
                     onDevice = onBack ?: {},
                     onEvents = { showEventsScreen = true },
                     showPresets = showPresets,
@@ -449,10 +450,10 @@ fun LiveScreen(
                         beyondViewportPageCount = 0,
                         userScrollEnabled = zoomScale == 1f,
                     ) { rawPage ->
-                        val ch = allChannels.getOrNull(rawPage % count)
-                        if (ch != null) {
+                        val pageCh = allChannels.getOrNull(rawPage % count)
+                        if (pageCh != null) {
                             ChannelGridTile(
-                                ch = ch,
+                                ch = pageCh,
                                 isSelected = false,
                                 connectedChannels = viewModel.connectedChannels,
                                 channelStatus = viewModel.channelStatus,
@@ -463,10 +464,10 @@ fun LiveScreen(
                                 viewModel = viewModel,
                                 onTap = {},
                                 onDoubleTap = { if (zoomScale > 1f) zoomScale = 1f else singleChannelView = false },
-                                onThumbnail = { bmp -> viewModel.setChannelThumbnail(ch.id, bmp) },
-                                snapshotTrigger = if (ch.id == selectedChannel) snapshotTrigger else 0,
-                                isRecording = ch.id == selectedChannel && isRecording,
-                                onRecordSaved = if (ch.id == selectedChannel) {
+                                onThumbnail = { bmp -> viewModel.setChannelThumbnail(pageCh.id, bmp) },
+                                snapshotTrigger = if (pageCh.id == selectedChannel) snapshotTrigger else 0,
+                                isRecording = pageCh.id == selectedChannel && isRecording,
+                                onRecordSaved = if (pageCh.id == selectedChannel) {
                                     { name -> coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") } }
                                 } else null,
                             )
@@ -611,6 +612,7 @@ fun LiveScreen(
                         chatHost = chatHost,
                         chatPort = chatPort,
                         chatCamIp = chatCamIp,
+                        cameraProtocol = ch?.protocol.orEmpty(),
                         username = viewModel.credentials?.username.orEmpty().ifBlank { "admin" },
                         password = viewModel.credentials?.password ?: "",
                         onError = { msg ->
@@ -766,7 +768,7 @@ private fun LiveChannelGrid(
     viewModel: NvrViewModel,
     onChannelTap: (Int) -> Unit,
     onDoubleTap: ((Int) -> Unit)? = null,
-    onThumbnail: ((Bitmap) -> Unit)? = null,
+    @Suppress("UNUSED_PARAMETER") onThumbnail: ((Bitmap) -> Unit)? = null,
     snapshotTrigger: Int = 0,
     isRecording: Boolean = false,
     onRecordSaved: ((String) -> Unit)? = null,
@@ -1091,7 +1093,6 @@ private fun VideoControlsBar(
 ) {
     var showGridMenu by remember { mutableStateOf(false) }
     val gridLabel = if (singleChannelView) "1" else channelCount.toString()
-    val gridCols  = 2  // always 2×2 grid per page
     val pageCount = (channelCount + 3) / 4
 
     Row(
@@ -1478,11 +1479,11 @@ private fun PresetsSheet(
 
 @Composable
 private fun LiveBottomBar(
-    selectedChannel: Int,
     creds: NvrCredentials?,
     chatHost: String = "",
     chatPort: Int = 80,
     chatCamIp: String = "",
+    cameraProtocol: String = "",
     onDevice: () -> Unit,
     onEvents: () -> Unit,
     showPresets: Boolean,
@@ -1508,6 +1509,7 @@ private fun LiveBottomBar(
                 chatHost = chatHost,
                 chatPort = chatPort,
                 chatCamIp = chatCamIp,
+                cameraProtocol = cameraProtocol,
                 username = creds?.username.orEmpty().ifBlank { "admin" },
                 password = creds?.password ?: "",
                 onError = onTalkError,
@@ -1545,6 +1547,8 @@ private fun MicHoldButton(
     chatPort: Int,
     /** Camera IP used as Host header so the camera's HTTP server accepts the routed request. */
     chatCamIp: String,
+    /** Camera protocol from IPCamInfo.Protocolname. Used to gate talkback for non-N1 cameras. */
+    cameraProtocol: String = "",
     username: String,
     password: String,
     onError: ((String) -> Unit)? = null,
@@ -1591,8 +1595,22 @@ private fun MicHoldButton(
                         val down = awaitPointerEvent()
                         if (down.changes.any { it.pressed }) {
                             pressed = true
+                            val proto = cameraProtocol.uppercase()
+                            // /cgi-bin/Chat is the N1/Adiance firmware audio protocol.
+                            // ONVIF, HIKVISION, DAHUA, and generic RTSP cameras don't expose
+                            // this endpoint — reject immediately rather than timing out.
+                            val talkbackUnsupported = proto.isNotBlank() && proto !in setOf("N1", "HICHIP")
                             if (!hasPermission) {
                                 permLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            } else if (talkbackUnsupported) {
+                                val label = when (proto) {
+                                    "HIKVISION" -> "Hikvision"
+                                    "DAHUA"     -> "Dahua"
+                                    "RTSP"      -> "RTSP"
+                                    else        -> proto
+                                }
+                                pressed = false
+                                onError?.invoke("Talkback not supported for $label cameras")
                             } else if (chatHost.isNotBlank()) {
                                 // LAN:   chatHost=NVR-IP,   chatPort=8540+ch,  chatCamIp=camera-IP
                                 // Cloud: chatHost=127.0.0.1, chatPort=h-tunnel, chatCamIp=camera-IP
@@ -1822,7 +1840,7 @@ private fun VlcRtspPlayer(
     rtspUrl: String,
     forceTcp: Boolean,
     isRemote: Boolean = false,
-    audioMuted: Boolean = false,
+    @Suppress("UNUSED_PARAMETER") audioMuted: Boolean = false,
     onThumbnail: ((Bitmap) -> Unit)? = null,
     snapshotTrigger: Int = 0,
     isRecording: Boolean = false,

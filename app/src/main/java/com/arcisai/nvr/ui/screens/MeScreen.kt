@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Help
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -195,7 +196,7 @@ private fun ProfilePage(
                 ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                     MeNavRow("NVR Settings", Icons.Default.Settings, onClick = onOpenNvrSettings)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
-                    MeNavRow("Help", Icons.Default.Help, onClick = onHelp)
+                    MeNavRow("Help", Icons.AutoMirrored.Filled.Help, onClick = onHelp)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
                     MeNavRow("Privacy Policy", Icons.Default.Security, onClick = onPrivacyPolicy)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
@@ -335,10 +336,6 @@ private fun SystemPrivacyPage(onBack: () -> Unit) {
         ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
     }
-    val cameraGranted = remember(refreshKey) {
-        ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
-    }
     val notifGranted = remember(refreshKey) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
@@ -401,13 +398,6 @@ private fun SystemPrivacyPage(onBack: () -> Unit) {
                 title = "Notifications",
                 description = "Allows the app to display alarm alerts and motion-detection events in the status bar and lock screen.",
                 granted = notifGranted,
-                onClick = { openAppSettings() },
-            )
-            PermissionCard(
-                icon = Icons.Default.CameraAlt,
-                title = "Camera",
-                description = "Used to scan QR codes when adding a new NVR device to your account.",
-                granted = cameraGranted,
                 onClick = { openAppSettings() },
             )
         }

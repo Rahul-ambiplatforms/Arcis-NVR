@@ -83,7 +83,6 @@ private class ReplayController(
                     firstNanos = System.nanoTime()
                     // Use firmware timestamp if it's within ±5 min of the requested range
                     if (f.timestampSec in (begin - 300)..(end + 300)) firstTs = f.timestampSec
-                    pts = 0L
                     onStatus("Playing")
                 }
 

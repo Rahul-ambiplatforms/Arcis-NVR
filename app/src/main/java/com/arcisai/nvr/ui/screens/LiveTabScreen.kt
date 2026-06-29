@@ -205,7 +205,7 @@ private fun DeviceCard(
     onMenuSettings: () -> Unit,
     onMenuDelete: () -> Unit,
     onChannelTap: (Int) -> Unit,
-    onPlaybackTap: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") onPlaybackTap: () -> Unit,
 ) {
     val tapChannel = channels.firstOrNull { it.ipAddr.isNotBlank() }?.id ?: 0
 

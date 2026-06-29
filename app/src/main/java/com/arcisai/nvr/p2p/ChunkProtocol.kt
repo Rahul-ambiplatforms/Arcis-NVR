@@ -109,7 +109,7 @@ class Reassembler {
         }
 
         // Frame complete iff one merged range covers [0, totalSize).
-        return if (f.ranges.size == 1 && f.ranges.firstKey() == 0 && f.ranges.firstEntry().value == hdr.totalSize) {
+        return if (f.ranges.size == 1 && f.ranges.firstKey() == 0 && f.ranges.firstEntry()!!.value == hdr.totalSize) {
             frames.remove(hdr.connId)
             hdr.connId to f.buf
         } else null

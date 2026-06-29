@@ -177,12 +177,13 @@ class NetSdkApi(val creds: NvrCredentials) {
     // ------------------------------------------------------------------
     // R.SoundManCtrl/R.AlarmLightManCtrl only accept GET (PUT → 404).
     // R.Channel.TriggerAlarm accepts PUT, returns 200 "Save failure" (HDD absent) but triggers camera alarm.
-    suspend fun triggerSiren(channelId: Int, durationSec: Int = 10): String =
+    suspend fun triggerSiren(channelId: Int, @Suppress("UNUSED_PARAMETER") durationSec: Int = 10): String =
         put("/netsdk/R.Channel.TriggerAlarm",
             JSONObject().put("ID", channelId).toString())
 
     suspend fun stopSiren(): String = ""   // one-shot; camera stops after firmware timeout
 
+    @Suppress("UNUSED_PARAMETER")
     suspend fun triggerAlarmLight(channelId: Int, durationSec: Int = 10): String = ""
 
     suspend fun stopAlarmLight(): String = ""

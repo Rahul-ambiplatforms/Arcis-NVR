@@ -63,6 +63,7 @@ data class LoginEvent(val epochMs: Long, val email: String)
 class NvrViewModel(app: Application) : AndroidViewModel(app) {
     private val store = CredentialStore(app)
     private val cache = ChannelCache(app)
+    private val audioPrefs = app.getSharedPreferences("channel_audio_gain", android.content.Context.MODE_PRIVATE)
     // Lazy: created on first cloud login.
     private val cloudApi: BackendApi by lazy { BackendApi.create(app) }
 
@@ -370,13 +371,12 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
 
                     // Slow path: connect fresh. Fast fixed retry (no exponential back-off).
                     var connected = false
-                    var lastErr: String? = null
                     for (attempt in 1..3) {
                         remoteStatus = if (attempt == 1) "Connecting to NVR…"
                                        else "Reconnecting… ($attempt/3)"
                         val session = RemoteSession(creds.deviceId, remoteConfig)
                         if (!session.connect()) {
-                            session.close(); lastErr = "connection failed"
+                            session.close()
                         } else {
                             try {
                                 val a = NetSdkApi(creds.copy(host = "127.0.0.1", port = session.localPort))
@@ -392,7 +392,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                                 connected = true
                                 break
                             } catch (t: Throwable) {
-                                lastErr = t.message ?: "tunnel probe failed"
+                                android.util.Log.w("NvrViewModel", "tunnel probe failed: ${t.message}")
                                 session.close()  // free the consumer so the retry is clean
                             }
                         }
@@ -1860,10 +1860,15 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         alarmJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val user = credentials?.username.orEmpty().ifBlank { "admin" }
             val pass = credentials?.password ?: ""
-            val ep = chatEndpoint(channelId)
+
+            // /cgi-bin/Chat is N1/Adiance-only. For ONVIF/HIK/DAHUA cameras skip
+            // Chat and go directly to the NVR alarm trigger endpoint.
+            val proto = channels.firstOrNull { it.id == channelId }?.protocol.orEmpty().uppercase()
+            val isN1 = proto.isBlank() || proto in setOf("N1", "HICHIP")
+            val ep = if (isN1) chatEndpoint(channelId) else null
 
             if (ep == null || ep.first.isBlank()) {
-                // No Chat endpoint available — fall back to NVR HTTP alarm trigger.
+                // No Chat endpoint available (or non-N1 camera) — use NVR HTTP alarm trigger.
                 runCatching { api?.triggerSiren(channelId, durationSec) }
                 kotlinx.coroutines.delay(durationSec * 1_000L)
                 cameraAlarmActive = false
@@ -1906,7 +1911,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun stopCameraAlarm(channelId: Int) {
+    fun stopCameraAlarm(@Suppress("UNUSED_PARAMETER") channelId: Int) {
         alarmJob?.cancel()
         alarmChatClient?.stop(); alarmChatClient = null
         viewModelScope.launch {
@@ -1914,6 +1919,17 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             runCatching { api?.stopAlarmLight() }
         }
         cameraAlarmActive = false
+    }
+
+    // ---- Per-channel audio volume (app-side, no camera API) ------------------
+    // Stored in SharedPreferences as a float gain factor (0.0 – 1.0).
+    // Applied to the AudioTrack in WsAudioListenClient.
+
+    fun channelAudioGain(channelId: Int): Float =
+        audioPrefs.getFloat("gain_$channelId", 1.0f)
+
+    fun setChannelAudioGain(channelId: Int, gain: Float) {
+        audioPrefs.edit().putFloat("gain_$channelId", gain.coerceIn(0f, 1f)).apply()
     }
 
     /** Pull the human-readable bit out of the publisher's JSON error.
@@ -2107,7 +2123,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                             humanArr.getJSONObject(j).put("HumanEnable", if (humanEnable) "True" else "False")
                         }
                         val actions = ch.optJSONObject("Actions")
-                        actions?.put("AppAlarm", if (appAlarm) "True" else "False")
+                            ?: JSONObject().also { ch.put("Actions", it) }
+                        actions.put("AppAlarm", if (appAlarm) "True" else "False")
                         break
                     }
                 }

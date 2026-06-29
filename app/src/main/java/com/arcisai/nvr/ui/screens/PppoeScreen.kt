@@ -70,7 +70,7 @@ fun PppoeScreen(vm: NvrViewModel, onBack: () -> Unit) {
                         SwitchSetting(prettyKey(k), on) { on = it; cfg.put(k, nvrStrBool(it)) }
                     }
                     else -> {
-                        var text by remember(cfg, k) { mutableStateOf(raw.toString()) }
+                        var text by remember(cfg, k) { mutableStateOf(raw?.toString() ?: "") }
                         val isPwd = k.contains("pass", true) || k.contains("pwd", true)
                         val isNum = raw is Int || raw is Long
                         TextSetting(

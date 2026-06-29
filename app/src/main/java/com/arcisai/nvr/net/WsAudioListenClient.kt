@@ -32,6 +32,7 @@ class WsAudioListenClient(
     private val username: String,
     private val password: String,
     private val channel: Int,
+    private val gain: Float = 1.0f,
     private val onReady: () -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -88,6 +89,7 @@ class WsAudioListenClient(
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         audioTrack?.play()
+        audioTrack?.setVolume(gain.coerceIn(0f, 1f))
     }
 
     private fun playAlaw(data: ByteArray, offset: Int, len: Int) {

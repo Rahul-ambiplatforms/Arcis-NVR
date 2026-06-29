@@ -6,6 +6,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.filled.DirectionsRun
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
@@ -95,7 +96,7 @@ fun MotionDetectionScreen(
                     ) {
                         Column {
                             MdToggleRow(
-                                icon  = Icons.Default.DirectionsRun,
+                                icon  = Icons.AutoMirrored.Filled.DirectionsRun,
                                 title = "Motion Detection",
                                 sub   = "Detect any movement in the camera view",
                                 value = mdEnabled,

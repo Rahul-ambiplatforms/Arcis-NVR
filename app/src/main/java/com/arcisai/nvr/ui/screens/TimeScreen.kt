@@ -263,7 +263,7 @@ private fun TimeOverviewPage(
                 Button(
                     onClick = {
                         syncing = true
-                        vm.syncTimeWithPhone { ok, msg ->
+                        vm.syncTimeWithPhone { _, msg ->
                             syncing = false
                             showSyncDialog = false
                             syncResult = msg

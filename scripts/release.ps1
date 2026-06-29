@@ -94,7 +94,7 @@ Write-Host "Release notes:" -ForegroundColor Cyan
 $Notes -split "`n" | ForEach-Object { Write-Host "  $_" }
 Write-Host ""
 
-$confirm = Read-Host "Proceed with release $tag? (y/N)"
+$confirm = Read-Host "Proceed with release ${tag}? (y/N)"
 if ($confirm -notmatch '^[Yy]$') {
     Write-Host "Aborted." -ForegroundColor Yellow
     exit 0

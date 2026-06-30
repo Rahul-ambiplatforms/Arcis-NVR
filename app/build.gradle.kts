@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.arcisai.nvr"
+        applicationId = "com.arcisainvr.app"
         minSdk = 26
         targetSdk = 35
         versionCode = 3
@@ -38,28 +38,42 @@ android {
         }
     }
 
+    // Release signing — credentials read from environment variables so nothing
+    // sensitive lives in git. Required env vars for a release build:
+    //   KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+    // If any are missing the release signingConfig is left unset and the build
+    // will fail explicitly at signing time (rather than silently producing an
+    // unsigned APK).
     signingConfigs {
         create("release") {
-            storeFile        = file("arcisai-release.jks")
-            storePassword    = "ArcisAI@2024"
-            keyAlias         = "arcisai"
-            keyPassword      = "ArcisAI@2024"
-            enableV1Signing  = true
-            enableV2Signing  = true
+            val ksPath = System.getenv("KEYSTORE_PATH")
+            val ksPwd  = System.getenv("KEYSTORE_PASSWORD")
+            val kAlias = System.getenv("KEY_ALIAS")
+            val kPwd   = System.getenv("KEY_PASSWORD")
+            if (!ksPath.isNullOrBlank() && !ksPwd.isNullOrBlank() &&
+                !kAlias.isNullOrBlank() && !kPwd.isNullOrBlank()) {
+                storeFile       = file(ksPath)
+                storePassword   = ksPwd
+                keyAlias        = kAlias
+                keyPassword     = kPwd
+                enableV1Signing = true
+                enableV2Signing = true
+            }
         }
     }
 
-    buildTypes {
+    buildTypes {    
         debug {
-            // Sign debug builds with the release key so they install over the production
-            // app without needing to uninstall first (avoids INSTALL_FAILED_UPDATE_INCOMPATIBLE).
-            signingConfig = signingConfigs.getByName("release")
+            // Debug builds use Android's auto-generated debug keystore.
+            // Note: a debug-signed build can't install over a release-signed production app
+            // (INSTALL_FAILED_UPDATE_INCOMPATIBLE) — uninstall the production app first.
         }
         release {
             signingConfig  = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        
     }
 
     compileOptions {

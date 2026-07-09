@@ -1,5 +1,6 @@
 package com.arcisai.nvr
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -41,6 +42,9 @@ import com.arcisai.nvr.ui.screens.MediaGalleryScreen
 import com.arcisai.nvr.ui.screens.LiveTabScreen
 import com.arcisai.nvr.ui.screens.LogsScreen
 import com.arcisai.nvr.ui.screens.LoginScreen
+import com.arcisai.nvr.ui.screens.RegisterScreen
+import com.arcisai.nvr.ui.screens.ForgotPasswordScreen
+import com.arcisai.nvr.ui.screens.ResetPasswordScreen
 import com.arcisai.nvr.ui.screens.MaintenanceScreen
 import com.arcisai.nvr.ui.screens.ManageScreen
 import com.arcisai.nvr.ui.screens.MeScreen
@@ -63,8 +67,25 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: NvrViewModel by viewModels()
 
+    /** Pull the reset token out of a `.../resetPassword/<token>` deep link.
+     *  Returns null for any other intent. */
+    private fun extractResetToken(intent: Intent?): String? {
+        val data = intent?.data ?: return null
+        val segments = data.pathSegments ?: return null
+        val i = segments.indexOfFirst { it.equals("resetPassword", ignoreCase = true) }
+        if (i < 0 || i + 1 >= segments.size) return null
+        return segments[i + 1].takeIf { it.isNotBlank() }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        extractResetToken(intent)?.let { viewModel.pendingResetToken = it }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        extractResetToken(intent)?.let { viewModel.pendingResetToken = it }
         setContent {
             ArcisNvrTheme {
                 Surface(modifier = Modifier.fillMaxSize(),
@@ -101,8 +122,40 @@ class MainActivity : ComponentActivity() {
                                             popUpTo("login") { inclusive = true }
                                         }
                                     },
+                                    onNavigateToRegister = {
+                                        rootNav.navigate("register")
+                                    },
+                                    onNavigateToForgot = {
+                                        rootNav.navigate("forgot_password")
+                                    },
+                                    onNavigateToReset = {
+                                        rootNav.navigate("reset_password")
+                                    },
                                 )
                             }
+                        }
+                        composable("register") {
+                            RegisterScreen(
+                                vm = viewModel,
+                                onBackToLogin = { rootNav.popBackStack() },
+                            )
+                        }
+                        composable("forgot_password") {
+                            ForgotPasswordScreen(
+                                vm = viewModel,
+                                onGoToReset = { rootNav.navigate("reset_password") },
+                                onBackToLogin = {
+                                    rootNav.popBackStack("login", inclusive = false)
+                                },
+                            )
+                        }
+                        composable("reset_password") {
+                            ResetPasswordScreen(
+                                vm = viewModel,
+                                onDone = {
+                                    rootNav.popBackStack("login", inclusive = false)
+                                },
+                            )
                         }
                         composable("my_nvrs") {
                             MyNvrsScreen(

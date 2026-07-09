@@ -20,8 +20,12 @@ import com.arcisai.nvr.net.AESEncryption
 import com.arcisai.nvr.net.AbdDto
 import com.arcisai.nvr.net.AddAbdRequest
 import com.arcisai.nvr.net.BackendApi
+import com.arcisai.nvr.net.EmailRequest
 import com.arcisai.nvr.net.GetAbdRequest
 import com.arcisai.nvr.net.LoginRequest
+import com.arcisai.nvr.net.RegisterRequest
+import com.arcisai.nvr.net.ResetPasswordRequest
+import com.arcisai.nvr.net.VerifyOtpRequest
 import com.arcisai.nvr.net.NetSdkApi
 import com.arcisai.nvr.net.NetSdkException
 import com.arcisai.nvr.net.OnvifDiscovery
@@ -492,10 +496,11 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 val enc = AESEncryption.encrypt(password)
                 val resp = cloudApi.login(LoginRequest(email = email, password = enc))
                 if (!resp.success) {
-                    loginStatus = resp.data ?: resp.message ?: "Login failed"
+                    onAuthFailure(email, resp.data ?: resp.message ?: "Login failed")
                     return@launch
                 }
                 accountSignedIn = true
+                authNotice   = null
                 accountName  = resp.name
                 accountEmail = resp.email ?: email
                 // Persist a cloud-session marker so the restore path on next launch
@@ -513,11 +518,190 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 onSuccess()
             } catch (t: Throwable) {
+                onAuthFailure(email, friendlyHttpError(t))
+            } finally {
+                loginBusy = false
+            }
+        }
+    }
+
+    /** Login failed — but "please verify your email" isn't a dead end: mirror
+     *  the production client and route the user straight into the OTP step
+     *  (re-sending the code first) instead of showing the raw error. */
+    private fun onAuthFailure(email: String, msg: String) {
+        if (msg.contains("verify", ignoreCase = true)) {
+            loginStatus = null
+            pendingVerificationEmail = email
+            resendRegistrationOtp(email, silent = true)
+        } else {
+            loginStatus = msg
+        }
+    }
+
+    // ---- Registration (same backend flow as the production ArcisAI app) ---
+    /** Set when a login bounced with "verify your email" — the register screen
+     *  opens directly on the OTP step for this address. Cleared on success. */
+    var pendingVerificationEmail by mutableStateOf<String?>(null)
+
+    /** Success-styled notice for the login screen (e.g. "email verified"). */
+    var authNotice by mutableStateOf<String?>(null)
+
+    /** POST /auth/register. Password AES-encrypted like login; on success the
+     *  backend emails an OTP and the UI should advance to the verify step. */
+    fun accountRegister(
+        name: String, mobile: String, email: String, password: String,
+        onSuccess: () -> Unit,
+    ) {
+        if (loginBusy) return
+        loginBusy = true
+        loginStatus = null
+        viewModelScope.launch {
+            try {
+                val resp = cloudApi.register(RegisterRequest(
+                    name = name, mobile = mobile, email = email,
+                    password = AESEncryption.encrypt(password),
+                ))
+                if (resp.success) {
+                    onSuccess()
+                } else {
+                    loginStatus = resp.data ?: resp.message ?: "Registration failed"
+                }
+            } catch (t: Throwable) {
                 loginStatus = friendlyHttpError(t)
             } finally {
                 loginBusy = false
             }
         }
+    }
+
+    /** POST /auth/verify with the emailed OTP. On success the account becomes
+     *  usable — route back to the login form. */
+    fun verifyRegistrationOtp(email: String, otp: String, onSuccess: () -> Unit) {
+        if (loginBusy) return
+        loginBusy = true
+        loginStatus = null
+        viewModelScope.launch {
+            try {
+                val resp = cloudApi.verifyRegistration(VerifyOtpRequest(email = email, otp = otp))
+                if (resp.success) {
+                    pendingVerificationEmail = null
+                    authNotice = "Email verified — please sign in"
+                    onSuccess()
+                } else {
+                    loginStatus = resp.data ?: resp.message ?: "Verification failed. Please try again."
+                }
+            } catch (t: Throwable) {
+                loginStatus = friendlyHttpError(t)
+            } finally {
+                loginBusy = false
+            }
+        }
+    }
+
+    /** POST /auth/resendOtp. [silent] suppresses the confirmation notice (used
+     *  by the auto-resend on unverified login). Never surfaces errors as a
+     *  blocker — the user can always tap resend again. */
+    fun resendRegistrationOtp(email: String, silent: Boolean = false) {
+        viewModelScope.launch {
+            try {
+                cloudApi.resendOtp(EmailRequest(email = email))
+                if (!silent) authNotice = "OTP re-sent to $email"
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                if (!silent) loginStatus = friendlyHttpError(t)
+            }
+        }
+    }
+
+    // ---- Password reset ---------------------------------------------------
+    /** Reset token captured from a `view.arcisai.io/resetPassword/<token>`
+     *  deep link (MainActivity sets it). The login screen observes this and
+     *  routes to the reset screen with the token pre-filled. */
+    var pendingResetToken by mutableStateOf<String?>(null)
+
+    /** POST /auth/forgotPassword. On success the backend emails a reset link;
+     *  [onResult] gets true so the UI can show "check your email". Backend
+     *  rate-limits to 1/min (429) — surfaced via [loginStatus]. */
+    fun forgotPassword(email: String, onResult: (Boolean) -> Unit) {
+        if (loginBusy) return
+        loginBusy = true
+        loginStatus = null
+        viewModelScope.launch {
+            try {
+                val resp = cloudApi.forgotPassword(EmailRequest(email = email))
+                if (resp.success) {
+                    authNotice = "Reset link sent to $email"
+                    onResult(true)
+                } else {
+                    loginStatus = resp.data ?: resp.message ?: "Couldn't send reset link"
+                    onResult(false)
+                }
+            } catch (t: Throwable) {
+                loginStatus = friendlyHttpError(t)
+                onResult(false)
+            } finally {
+                loginBusy = false
+            }
+        }
+    }
+
+    /** POST /auth/resetPassword with the emailed token. Confirms the two
+     *  passwords match locally, then AES-encrypts both (the backend decrypts
+     *  with the shared key/IV, same as login). On success routes back to
+     *  sign-in with a notice. */
+    fun resetPassword(token: String, newPassword: String, confirmPassword: String, onResult: (Boolean) -> Unit) {
+        if (loginBusy) return
+        if (token.isBlank()) {
+            loginStatus = "Missing reset link/token. Open the link from your reset email, or paste it above."
+            onResult(false)
+            return
+        }
+        if (newPassword != confirmPassword) {
+            loginStatus = "Passwords don't match."
+            onResult(false)
+            return
+        }
+        if (newPassword.length < 8) {
+            loginStatus = "Password must be at least 8 characters."
+            onResult(false)
+            return
+        }
+        loginBusy = true
+        loginStatus = null
+        viewModelScope.launch {
+            try {
+                val enc = AESEncryption.encrypt(newPassword)
+                val resp = cloudApi.resetPassword(ResetPasswordRequest(
+                    token = token, password = enc, confirmPassword = enc,
+                ))
+                if (resp.success) {
+                    pendingResetToken = null
+                    authNotice = "Password updated — please sign in"
+                    onResult(true)
+                } else {
+                    loginStatus = resp.data ?: resp.message ?: "Reset failed — the link may have expired."
+                    onResult(false)
+                }
+            } catch (t: Throwable) {
+                loginStatus = friendlyHttpError(t)
+                onResult(false)
+            } finally {
+                loginBusy = false
+            }
+        }
+    }
+
+    /** Extract the reset token from a pasted `view.arcisai.io/resetPassword/<token>`
+     *  URL. If the input isn't a URL we assume it's the bare token already. */
+    fun extractResetToken(input: String): String {
+        val s = input.trim()
+        val marker = "resetPassword/"
+        val idx = s.indexOf(marker, ignoreCase = true)
+        if (idx >= 0) {
+            return s.substring(idx + marker.length)
+                .substringBefore('/').substringBefore('?').substringBefore('#').trim()
+        }
+        return s
     }
 
     /** Try to resume an existing cloud session by hitting /abd/getAbd with the

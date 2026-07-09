@@ -42,6 +42,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- App Links for the password-reset email link
+                 (https://view.arcisai.io/resetPassword/<token>). autoVerify
+                 only takes effect once this app's package + signing cert are
+                 listed in https://view.arcisai.io/.well-known/assetlinks.json;
+                 until then the in-app "paste reset link" fallback is used. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="view.arcisai.io" />
+            </intent-filter>
         </activity>
     </application>
 </manifest>

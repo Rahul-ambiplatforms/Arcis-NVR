@@ -42,7 +42,22 @@ fun LoginScreen(
     vm: NvrViewModel,
     onLanConnected: () -> Unit,       // kept for nav graph compatibility; not used here
     onCloudAuthenticated: () -> Unit,
+    onNavigateToRegister: () -> Unit = {},
+    onNavigateToForgot: () -> Unit = {},
+    onNavigateToReset: () -> Unit = {},
 ) {
+    // A login that failed with "please verify your email" routes straight to
+    // the register screen's OTP step (ViewModel pre-set the email + re-sent
+    // the code).
+    LaunchedEffect(vm.pendingVerificationEmail) {
+        if (vm.pendingVerificationEmail != null) onNavigateToRegister()
+    }
+    // A password-reset deep link (view.arcisai.io/resetPassword/<token>) sets
+    // pendingResetToken — jump straight to the reset form.
+    LaunchedEffect(vm.pendingResetToken) {
+        if (vm.pendingResetToken != null) onNavigateToReset()
+    }
+
     var remote     by remember { mutableStateOf(true) }
     var email      by remember { mutableStateOf("") }
     var pwd        by remember { mutableStateOf("") }
@@ -120,6 +135,19 @@ fun LoginScreen(
                                 }
                             },
                         )
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            TextButton(
+                                onClick = {
+                                    vm.loginStatus = null
+                                    vm.authNotice = null
+                                    onNavigateToForgot()
+                                },
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                            ) {
+                                Text("Forgot password?", fontSize = 12.sp)
+                            }
+                        }
                     } else {
                         OutlinedTextField(
                             value = host, onValueChange = { host = it.trim() },
@@ -165,6 +193,9 @@ fun LoginScreen(
                     vm.loginStatus?.let {
                         Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
                     }
+                    vm.authNotice?.let {
+                        Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                    }
                     vm.remoteStatus?.let {
                         Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
                     }
@@ -200,6 +231,19 @@ fun LoginScreen(
                                 if (remote) "Sign in" else "Connect",
                                 fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                             )
+                        }
+                    }
+
+                    if (remote) {
+                        TextButton(
+                            onClick = {
+                                vm.loginStatus = null
+                                vm.authNotice = null
+                                onNavigateToRegister()
+                            },
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        ) {
+                            Text("New to Arcis?  Create account", fontSize = 13.sp)
                         }
                     }
                 }

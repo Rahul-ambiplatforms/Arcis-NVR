@@ -418,10 +418,33 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     onSuccess()
                 }
             } catch (t: Throwable) {
-                loginStatus = t.message ?: "Login failed"
+                loginStatus = friendlyLanError(t)
             } finally {
                 loginBusy = false
             }
+        }
+    }
+
+    /** Turn a raw NVR connect failure into a short, user-facing message.
+     *  Hides the "HTTP 401: …" technical text behind a plain login-invalid line. */
+    private fun friendlyLanError(t: Throwable): String {
+        if (t is NetSdkException) {
+            return when (t.httpCode) {
+                401, 403 -> "Invalid username or password"
+                404      -> "This device doesn't answer the NVR API — check the IP and port"
+                in 500..599 -> "The NVR reported an error — please try again"
+                else     -> "Couldn't sign in (error ${t.httpCode})"
+            }
+        }
+        val raw = t.message.orEmpty()
+        return when {
+            raw.contains("timeout", ignoreCase = true) ->
+                "Connection timed out — check the IP and that you're on the same network"
+            raw.contains("ConnectException", ignoreCase = true) ||
+            raw.contains("UnknownHost", ignoreCase = true) ||
+            raw.contains("Failed to connect", ignoreCase = true) ->
+                "Couldn't reach the NVR — check the IP address and port"
+            else -> "Couldn't connect to the NVR — check the details and try again"
         }
     }
 
@@ -907,42 +930,87 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             streamUrlCache.remove(cacheKey)
         }
 
-        val api = publisher() ?: return null
-
+        // The Adiance publisher (:8080) owns per-brand ONVIF resolution. Standard
+        // 16-ch NVRs don't run it, so treat a failed/empty publisher reply as
+        // "no publisher" and (on LAN) fall back to a direct RTSP URL below.
         val resolved = try {
-            api.channelStream(channelId, streamType)
+            publisher()?.channelStream(channelId, streamType)
         } catch (t: Throwable) {
             android.util.Log.w("NvrViewModel",
                 "publisher /api/channels/$channelId/stream failed: ${t.message}")
-            return null
-        }
-        if (resolved.url.isBlank()) {
-            android.util.Log.w("NvrViewModel",
-                "publisher returned empty URL for ch$channelId (${resolved.error})")
-            return null
+            null
         }
 
-        val routed = if (creds.remote) {
-            val rtspPort = ensureChannelRtspTunnel(channelId) ?: return null
-            rewriteUrlHost(resolved.url, "127.0.0.1", rtspPort)
-        } else {
-            // LAN URL resolution order (first non-null wins):
-            // 1) ONVIF GetStreamUri — exact path + creds direct from camera.
-            // 2) Publisher URL verbatim — the publisher already has the camera's direct
-            //    RTSP URL (with credentials). Use it if the camera is TCP-reachable
-            //    from the phone (same LAN, no AP client isolation). This avoids
-            //    the NVR relay and works even when relay ports aren't all configured.
-            // 3) NVR relay rewrite — last resort when camera is not directly reachable
-            //    (AP client isolation). Requires tcpsvd relay on 5540+channelId.
-            onvifDirectStreamUrl(channelId, stream)
-                ?: lanDirectUrl(resolved.url)
-                ?: rewriteUrlHost(resolved.url, creds.host, 5540 + channelId)
+        val routed: String? = when {
+            resolved != null && resolved.url.isNotBlank() -> {
+                if (creds.remote) {
+                    val rtspPort = ensureChannelRtspTunnel(channelId) ?: return null
+                    rewriteUrlHost(resolved.url, "127.0.0.1", rtspPort)
+                } else {
+                    // LAN URL resolution order (first non-null wins):
+                    // 1) ONVIF GetStreamUri — exact path + creds direct from camera.
+                    // 2) Publisher URL verbatim — the publisher already has the camera's direct
+                    //    RTSP URL (with credentials). Use it if the camera is TCP-reachable
+                    //    from the phone (same LAN, no AP client isolation). This avoids
+                    //    the NVR relay and works even when relay ports aren't all configured.
+                    // 3) NVR relay rewrite — last resort when camera is not directly reachable
+                    //    (AP client isolation). Requires tcpsvd relay on 5540+channelId.
+                    onvifDirectStreamUrl(channelId, stream)
+                        ?: lanDirectUrl(resolved.url)
+                        ?: rewriteUrlHost(resolved.url, creds.host, 5540 + channelId)
+                }
+            }
+            // No publisher — standard NVR. LAN only: stream straight over RTSP.
+            !creds.remote -> nvrDirectRtspUrl(channelId, stream)
+            else -> null  // Remote needs the publisher/tunnels; can't fall back.
+        }
+
+        if (routed == null) {
+            android.util.Log.w("NvrViewModel",
+                "no stream URL for ch$channelId (publisher + direct RTSP unavailable)")
+            return null
         }
 
         android.util.Log.i("NvrViewModel", "streamUrl ch$channelId stream$stream → $routed")
         val result = maybeWrapTls(routed, channelId)
         streamUrlCache[cacheKey] = result
         return result
+    }
+
+    /** LAN fallback for standard NVRs that don't run the Adiance :8080 publisher.
+     *  Streams a channel straight over RTSP: the camera's own server when the
+     *  phone can reach it (path taken from the camera's recorded protocol, so it
+     *  matches exactly), otherwise the NVR's own restream on :554. Returns null
+     *  when neither RTSP endpoint is reachable. */
+    private suspend fun nvrDirectRtspUrl(channelId: Int, stream: Int): String? {
+        val creds = credentials ?: return null
+
+        // 1) Camera-direct — uses IPCamInfo.Protocolname so the RTSP path is exact.
+        //    Only when the camera IP is reachable from the phone (cameras on the
+        //    same LAN, not isolated behind the NVR's PoE ports).
+        findIpCamEntry(channelId)?.let { entry ->
+            NetSdkApi.cameraRtspUrl(entry, channelId, stream)?.let { camUrl ->
+                val host = runCatching { java.net.URI(camUrl).host }.getOrNull()
+                if (host != null && tcpReachable(host, 554, 500)) {
+                    android.util.Log.i("NvrViewModel", "direct camera RTSP ch$channelId -> $camUrl")
+                    return camUrl
+                }
+            }
+        }
+
+        // 2) NVR restream on its own :554. 16-ch NVRs that answer /netsdk with
+        //    Digest are almost always Hikvision-derived; the ISAPI channel path is
+        //    /Streaming/Channels/<ch><stream> (stream 01=main, 02=sub).
+        if (!tcpReachable(creds.host, 554, 800)) {
+            android.util.Log.w("NvrViewModel",
+                "NVR ${creds.host}:554 unreachable — no RTSP restream for ch$channelId")
+            return null
+        }
+        val userInfo = "${creds.username}:${creds.password}"
+        val code = (channelId + 1) * 100 + (if (stream == 0) 1 else 2)
+        val url = "rtsp://$userInfo@${creds.host}:554/Streaming/Channels/$code"
+        android.util.Log.i("NvrViewModel", "NVR restream ch$channelId -> $url")
+        return url
     }
 
     /** LAN-only ONVIF self-resolution with session cache. Returns null (→ caller

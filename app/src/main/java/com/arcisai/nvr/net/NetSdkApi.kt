@@ -3,7 +3,6 @@ package com.arcisai.nvr.net
 import com.arcisai.nvr.data.NvrCredentials
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Credentials
 import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -25,14 +24,20 @@ import java.util.concurrent.TimeUnit
  */
 class NetSdkApi(val creds: NvrCredentials) {
 
+    // Shared auth state so a Digest challenge seen on one call is reused
+    // (preemptively) by the next, keeping later requests to one round trip.
+    private val digestState = DigestState()
+
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(false)
+        // Preemptive Basic (unchanged for old firmware) + reactive Digest for
+        // Hikvision/Dahua-derived units that answer /netsdk with a Digest challenge.
+        .addInterceptor(PreemptiveAuthInterceptor(creds.username, creds.password, digestState))
+        .authenticator(DigestAuthenticator(creds.username, creds.password, digestState))
         .build()
-
-    private val authHeader = Credentials.basic(creds.username, creds.password)
 
     private fun urlOf(path: String): String {
         val cleanPath = if (path.startsWith("/")) path else "/$path"
@@ -42,7 +47,6 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun get(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(urlOf(path))
-            .header("Authorization", authHeader)
             .get()
             .build()
         client.newCall(req).execute().use { resp ->
@@ -55,7 +59,6 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun put(path: String, jsonBody: String = ""): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(urlOf(path))
-            .header("Authorization", authHeader)
             .put(jsonBody.toRequestBody(JSON_CT))
             .build()
         client.newCall(req).execute().use { resp ->
@@ -118,7 +121,6 @@ class NetSdkApi(val creds: NvrCredentials) {
                 .build()
             val req = Request.Builder()
                 .url(urlOf(path))
-                .header("Authorization", authHeader)
                 .post(formBody)
                 .build()
             client.newCall(req).execute().use { resp ->

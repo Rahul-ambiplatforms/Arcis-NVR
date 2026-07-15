@@ -107,9 +107,6 @@ fun LiveTabScreen(
                 DeviceCard(
                     displayName = displayName,
                     channels = vm.channels,
-                    connectedChannels = vm.connectedChannels,
-                    channelStatus = vm.channelStatus,
-                    thumbnails = vm.channelThumbnails,
                     showMenu = showMenu,
                     onMenuOpen = { showMenu = true },
                     onMenuDismiss = { showMenu = false },
@@ -194,9 +191,6 @@ fun LiveTabScreen(
 private fun DeviceCard(
     displayName: String,
     channels: List<ChannelInfo>,
-    connectedChannels: Set<Int>?,
-    channelStatus: Map<Int, String>,
-    thumbnails: Map<Int, Bitmap>,
     showMenu: Boolean,
     onMenuOpen: () -> Unit,
     onMenuDismiss: () -> Unit,
@@ -264,151 +258,56 @@ private fun DeviceCard(
                 }
             }
 
-            // ── adaptive camera grid (2 cols for ≤4 ch, 4 cols for 5+) ─────────
+            // ── Single device preview — no per-channel loading, tap to go live ──
+            val assignedCount = channels.count { it.ipAddr.isNotBlank() }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(if (channels.size <= 4) 1f else 2f)
-                    .background(Color.Black)
+                    .aspectRatio(16f / 9f)
+                    .background(Color(0xFF0D0A1C))
                     .clickable { onChannelTap(tapChannel) },
+                contentAlignment = Alignment.Center,
             ) {
-                val previewCols = if (channels.size <= 4) 2 else 4
-                val rows = channels.chunked(previewCols)
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(1.dp),
-                ) {
-                    rows.forEach { row ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth().weight(1f),
-                            horizontalArrangement = Arrangement.spacedBy(1.dp),
-                        ) {
-                            row.forEach { ch ->
-                                CardChannelTile(
-                                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                                    ch = ch,
-                                    connectedChannels = connectedChannels,
-                                    channelStatus = channelStatus,
-                                    thumbnail = thumbnails[ch.id],
-                                )
-                            }
-                            repeat(previewCols - row.size) {
-                                Box(
-                                    Modifier.weight(1f).fillMaxHeight()
-                                        .background(Color(0xFF111113)),
-                                )
-                            }
-                        }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.52f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = "Open live view",
+                            tint = Color.White,
+                            modifier = Modifier.size(34.dp),
+                        )
                     }
-                    if (rows.isEmpty()) {
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(28.dp))
-                        }
-                    }
-                }
-
-                // Single centred play button over the whole grid
-                Box(
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.52f))
-                        .align(Alignment.Center),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        Icons.Default.PlayArrow,
-                        contentDescription = "Open live view",
-                        tint = Color.White,
-                        modifier = Modifier.size(34.dp),
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Tap to view live",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.75f),
                     )
                 }
-            }
 
-        }
-    }
-}
-
-// ─── Mini tile inside the card grid ─────────────────────────────────────────
-
-@Composable
-private fun CardChannelTile(
-    modifier: Modifier,
-    ch: ChannelInfo,
-    connectedChannels: Set<Int>?,
-    channelStatus: Map<Int, String>,
-    thumbnail: Bitmap?,
-) {
-    val assigned = ch.ipAddr.isNotBlank()
-    val online = connectedChannels?.let { ch.id in it }
-    val connecting = channelStatus[ch.id].equals("Updating", ignoreCase = true)
-    val knownOffline = assigned && online == false && !connecting
-
-    Box(
-        modifier.background(
-            if (assigned && !knownOffline) Color(0xFF0D0A1C) else Color(0xFF111113)
-        ),
-    ) {
-        // Thumbnail (last captured frame)
-        if (thumbnail != null) {
-            Image(
-                bitmap = thumbnail.asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.12f)))
-        }
-
-        // Centre: show correct state per channel
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            when {
-                !assigned -> TileLabel(Icons.Default.VideocamOff, "No cam")
-                connecting -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
-                        color = Color.White.copy(alpha = 0.45f),
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 1.5.dp,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text("Connecting…", fontSize = 8.sp, color = Color.White.copy(alpha = 0.4f))
+                // Channel-count badge — top-left
+                if (channels.isNotEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color.Black.copy(alpha = 0.45f),
+                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                    ) {
+                        Text(
+                            "$assignedCount/${channels.size} channels",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            fontSize = 10.sp,
+                            color = Color.White,
+                        )
+                    }
                 }
-                knownOffline -> TileLabel(Icons.Default.VideocamOff, "Offline", tint = Color(0xFFE53935).copy(alpha = 0.7f))
-                thumbnail == null -> TileLabel(Icons.Default.Videocam, "Live")
-                else -> {}  // thumbnail fills the tile
             }
-        }
 
-        // CH badge — top-left
-        Surface(
-            shape = RoundedCornerShape(3.dp),
-            color = Color.Black.copy(alpha = 0.55f),
-            modifier = Modifier.padding(4.dp),
-        ) {
-            Text(
-                "CH ${ch.id + 1}",
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                fontSize = 8.sp,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-
-        // Status dot — top-right
-        if (assigned) {
-            val dotColor = when {
-                online == true -> ArcisGreen
-                connecting     -> Color(0xFFE0A800)
-                else           -> Color(0xFFE53935)
-            }
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(5.dp)
-                    .size(5.dp)
-                    .clip(CircleShape)
-                    .background(dotColor),
-            )
         }
     }
 }
@@ -430,21 +329,6 @@ private fun CardActionButton(icon: ImageVector, label: String, onClick: () -> Un
             tint = MaterialTheme.colorScheme.primary,
         )
         Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
-    }
-}
-
-// ─── Tile state label (icon + text) ─────────────────────────────────────────
-
-@Composable
-private fun TileLabel(
-    icon: ImageVector,
-    text: String,
-    tint: Color = Color.White.copy(alpha = 0.28f),
-) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(icon, null, tint = tint, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.height(3.dp))
-        Text(text, fontSize = 8.sp, color = tint)
     }
 }
 

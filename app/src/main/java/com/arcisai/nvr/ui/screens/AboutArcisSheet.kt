@@ -1,4 +1,4 @@
-package com.arcisai.nvr.ui.screens
+﻿package com.arcisai.nvr.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -31,17 +31,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arcisai.nvr.ui.theme.AccentPurple
-import com.arcisai.nvr.ui.theme.ArcisGreen
-import com.arcisai.nvr.ui.theme.ArcisOrange
 
-// Sky-blue accent for the Terms card. The NVR theme has no EventRegionExit
-// token (that lives in the main ArcisAI app), so we define it locally to keep
-// the About sheet visually identical to the production app.
-private val AboutBlue = Color(0xFF1FADE6)
-
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Reusable Legal Sheet wrapper
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,9 +75,9 @@ fun LegalSheet(title: String, onDismiss: () -> Unit, content: @Composable Column
     }
 }
 
-// ═══════════════════════════════════════════════════════════
-// About ArcisAI — single sheet with accordion sections
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// About ArcisAI â€” single sheet with accordion sections
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -127,43 +120,31 @@ fun AboutArcisAISheet(onDismiss: () -> Unit) {
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            // ── Accordion Items ──
+            // â”€â”€ Accordion Items â”€â”€
             AccordionItem(
-                icon = Icons.Outlined.Info, iconBg = AccentPurple,
+                icon = Icons.Outlined.Info,
                 title = "About Us", isExpanded = expandedSection == 0,
                 onClick = { expandedSection = if (expandedSection == 0) -1 else 0 }
             ) { AboutUsContent() }
 
             AccordionItem(
-                icon = Icons.Outlined.PrivacyTip, iconBg = ArcisGreen,
+                icon = Icons.Outlined.PrivacyTip,
                 title = "Privacy Policy", isExpanded = expandedSection == 1,
                 onClick = { expandedSection = if (expandedSection == 1) -1 else 1 }
             ) { PrivacyPolicyContent() }
 
             AccordionItem(
-                icon = Icons.Outlined.Description, iconBg = AboutBlue,
+                icon = Icons.Outlined.Description,
                 title = "Terms of Service", isExpanded = expandedSection == 2,
                 onClick = { expandedSection = if (expandedSection == 2) -1 else 2 }
             ) { TermsOfServiceContent() }
-
-            AccordionItem(
-                icon = Icons.Outlined.VerifiedUser, iconBg = ArcisOrange,
-                title = "Warranty Service", isExpanded = expandedSection == 3,
-                onClick = { expandedSection = if (expandedSection == 3) -1 else 3 }
-            ) { WarrantyServiceContent() }
-
-            AccordionItem(
-                icon = Icons.Outlined.Shield, iconBg = AccentPurple,
-                title = "Warranty Policies", isExpanded = expandedSection == 4,
-                onClick = { expandedSection = if (expandedSection == 4) -1 else 4 }
-            ) { WarrantyPolicyContent() }
         }
     }
 }
 
 @Composable
 private fun AccordionItem(
-    icon: ImageVector, iconBg: Color, title: String,
+    icon: ImageVector, title: String,
     isExpanded: Boolean, onClick: () -> Unit,
     content: @Composable () -> Unit
 ) {
@@ -181,12 +162,12 @@ private fun AccordionItem(
                     .padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier.size(32.dp).clip(RoundedCornerShape(8.dp)).background(iconBg),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-                }
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(22.dp),
+                )
                 Spacer(Modifier.width(12.dp))
                 Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
                 Icon(
@@ -209,9 +190,9 @@ private fun AccordionItem(
     }
 }
 
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Content composables for each accordion section
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @Composable
 private fun AboutUsContent() {
@@ -433,133 +414,15 @@ private fun TermsOfServiceContent() {
     Body("You understand and agree that if you use the Services after the date on which the Terms have changed, ArcisAI will treat your use as acceptance of the updated Universal Terms or Additional Terms.")
 
     SectionHeading("21. Dispute Resolution")
-    Body("Arbitration — If any dispute, claim, or controversy (\"Claims\") arises under this Agreement or through your use of the Services, such dispute shall be resolved by binding arbitration in accordance with the Commercial Arbitration Rules of the American Arbitration Association (\"AAA\") then pertaining, except where such rules conflict with this section, in which case this section shall control. There shall be three arbitrators. The parties agree that one arbitrator shall be appointed by each party within twenty (20) days of receipt by respondent(s) of the Request for Arbitration or in default thereof appointed by the AAA in accordance with its Commercial Rules, and the third presiding arbitrator shall be appointed by agreement of the two party-appointed arbitrators within fourteen (14) days of the appointment of the second arbitrator or, in default of such agreement, by the AAA. Any court with jurisdiction shall enforce this section and enter judgment on any award. Within forty-five (45) days of initiation of arbitration, the parties shall reach agreement upon and thereafter follow procedures assuring that the arbitration will be concluded and the award rendered within no more than eight (8) months from selection of arbitrators. The arbitration shall be held in Natrona County, Wyoming, and the arbitrators shall apply the substantive law of the State of Wyoming, except that the interpretation and enforcement of this arbitration provision shall be governed by the Federal Arbitration Act.")
-    Body("Exceptions — You and ArcisAI agree that the following Claims are not subject to the above provisions concerning negotiations and binding arbitration: (a) any Claim seeking to enforce or protect, or concerning the validity of, any of your or ArcisAI intellectual property rights; (b) any Claim related to, or arising from, allegations of theft, piracy, invasion of privacy, or unauthorized use; (c) any claim for equitable relief; and (d) any claim by a resident of the European Union or Switzerland regarding our adherence to the Privacy Shield Principles.")
-    Body("Class action/jury trial waiver — With respect to all persons and entities, regardless of whether they have obtained or used the services for personal, commercial, or other purposes, all claims must be brought in the parties' individual capacity, and not as a plaintiff or class member in any purported class action, collective action, private attorney general action, or other representative proceeding. This waiver applies to class arbitration, and, unless we agree otherwise, the arbitrator may not consolidate more than one person's claims. You agree that, by entering into this agreement, you and we are each waiving the right to a trial by jury or to participate in a class action, collective action, private attorney general action, or other representative proceeding of any kind.")
+    Body("Arbitration â€” If any dispute, claim, or controversy (\"Claims\") arises under this Agreement or through your use of the Services, such dispute shall be resolved by binding arbitration in accordance with the Commercial Arbitration Rules of the American Arbitration Association (\"AAA\") then pertaining, except where such rules conflict with this section, in which case this section shall control. There shall be three arbitrators. The parties agree that one arbitrator shall be appointed by each party within twenty (20) days of receipt by respondent(s) of the Request for Arbitration or in default thereof appointed by the AAA in accordance with its Commercial Rules, and the third presiding arbitrator shall be appointed by agreement of the two party-appointed arbitrators within fourteen (14) days of the appointment of the second arbitrator or, in default of such agreement, by the AAA. Any court with jurisdiction shall enforce this section and enter judgment on any award. Within forty-five (45) days of initiation of arbitration, the parties shall reach agreement upon and thereafter follow procedures assuring that the arbitration will be concluded and the award rendered within no more than eight (8) months from selection of arbitrators. The arbitration shall be held in Natrona County, Wyoming, and the arbitrators shall apply the substantive law of the State of Wyoming, except that the interpretation and enforcement of this arbitration provision shall be governed by the Federal Arbitration Act.")
+    Body("Exceptions â€” You and ArcisAI agree that the following Claims are not subject to the above provisions concerning negotiations and binding arbitration: (a) any Claim seeking to enforce or protect, or concerning the validity of, any of your or ArcisAI intellectual property rights; (b) any Claim related to, or arising from, allegations of theft, piracy, invasion of privacy, or unauthorized use; (c) any claim for equitable relief; and (d) any claim by a resident of the European Union or Switzerland regarding our adherence to the Privacy Shield Principles.")
+    Body("Class action/jury trial waiver â€” With respect to all persons and entities, regardless of whether they have obtained or used the services for personal, commercial, or other purposes, all claims must be brought in the parties' individual capacity, and not as a plaintiff or class member in any purported class action, collective action, private attorney general action, or other representative proceeding. This waiver applies to class arbitration, and, unless we agree otherwise, the arbitrator may not consolidate more than one person's claims. You agree that, by entering into this agreement, you and we are each waiving the right to a trial by jury or to participate in a class action, collective action, private attorney general action, or other representative proceeding of any kind.")
 
     SectionHeading("22. Force Majeure")
     Body("ArcisAI will be excused from performance under this Agreement for any period of time that ArcisAI is prevented from performing its obligations hereunder as a result of an act of God, criminal acts, distributed denial of service attacks, any acts of the common enemy, the elements, earthquakes, floods, fires, epidemics, riots, war, utility or communication failures, or other causes beyond its reasonable control.")
 
     SectionHeading("23. Miscellaneous")
     Body("These Terms of Use and any policies or operating rules posted by us on the Site or in respect to the Site constitute the entire agreement and understanding between you and us. Our failure to exercise or enforce any right or provision of these Terms of Use shall not operate as a waiver of such right or provision. These Terms of Use operate to the fullest extent permissible by law. We may assign any or all of our rights and obligations to others at any time. We shall not be responsible or liable for any loss, damage, delay, or failure to act caused by any cause beyond our reasonable control. If any provision or part of a provision of these Terms of Use is determined to be unlawful, void, or unenforceable, that provision or part of the provision is deemed severable from these Terms of Use and does not affect the validity and enforceability of any remaining provisions. There is no joint venture, partnership, employment, or agency relationship created between you and us as a result of these Terms of Use or use of the Site. You agree that these Terms of Use will not be construed against us by virtue of having drafted them. You hereby waive any and all defenses you may have based on the electronic form of these Terms of Use and the lack of signing by the parties hereto to execute these Terms of Use.")
-}
-
-@Composable
-private fun WarrantyServiceContent() {
-    SubBody("LAST UPDATED: January 25th 2021")
-    Body("Welcome to the online store (the \"Store\") provided by Ambiplatforms LLC (\"Ambiplatforms\"). Your purchase of ArcisAI hardware products (\"Products\") and/or subscription services (\"Subscription Services\") from the Store constitutes your agreement to be bound by these Terms & Conditions of Sale (\"Terms & Conditions\") and any additional terms we provide, including but not limited to our Terms of Service and the terms of the Limited Warranty included in-box with a Product.")
-    Body("This is a legal agreement. By placing an order for ArcisAI products and/or subscription services, you are accepting and agreeing to these Terms & Conditions. You represent and warrant that you have the right, authority, and capacity to accept and agree to these Terms & Conditions. You represent that you are of sufficient legal age in your jurisdiction or residence to purchase and use products and to enter into this agreement. If you do not agree with any of the provisions of these Terms & Conditions, you should not purchase the products.")
-    Body("We reserve the right to change these Terms & Conditions at any time, so please review the Terms & Conditions each time prior to making a purchase from the Store. Every time you order Products from ArcisAI, the Terms & Conditions in force at that time will apply between you and ArcisAI. If you purchase our Subscription Services, we will notify you in the event we make changes to these Terms & Conditions that affect your subscription.")
-    Body("The Store is for retail sales to private consumers only. Please contact contact@adiance.com if you wish to purchase wholesale supplies.")
-    Body("As a consumer, you have certain legal rights. The disclaimers, exclusions, and limitations of liability under these Terms & Conditions will not apply to the extent prohibited by applicable law. Some jurisdictions do not allow the exclusion of implied warranties, including exclusions relating to products or services that are faulty or not as described, or the exclusion or limitation of incidental or consequential damages or other rights.")
-    Body("Although the Store is accessible worldwide, the Products and Subscription Services offered on the Store are not designed and tested for use in all countries. If you choose to access the Store and/or use the Products and Subscription Services outside India, you do so on your own initiative and you are solely responsible for complying with applicable local laws in your country. To the extent permissible by law, ArcisAI accepts no responsibility or liability for any damage or loss caused by your access or use of the Store, Products and Subscription Services in a non-Target Country.")
-
-    SectionHeading("1. Compatibility")
-    Body("You acknowledge that you have verified the compatibility of the Products you are purchasing with other equipment in your home. You are solely responsible for determining the compatibility of the Products with other equipment in your home, and you accept that lack of compatibility is not a valid claim under the warranty provided with your Products and does not otherwise constitute a basis for receiving a refund after the 30-day refund policy described below.")
-
-    SectionHeading("2. Reservations and Pre-Orders")
-    Body("Products available for reservation and pre-order are not offered for sale by ArcisAI. Your placement of a reservation and pre-order does not create a contract for sale.")
-    Body("By placing a reservation and pre-order for a Product that is not yet available for sale, you make an offer to ArcisAI to purchase the Product subject to these Terms & Conditions. ArcisAI will obtain an authorization from your bank or credit card company for no charge. An authorization from your payment card company may stay open for several days or weeks before a charge is actually made.")
-    Body("You may cancel your offer to purchase Products at any time prior to shipment and you will not be charged. You will receive an email several days prior to the shipment of reserved Products in which you will have an option to cancel your offer.")
-    Body("Later, when the Product is offered for sale, ArcisAI may accept your offer to purchase Products subject to these Terms & Conditions. At that time, ArcisAI will capture payment on the payment card you provided and ship your Product.")
-    Body("ArcisAI reserves the right to cancel or refuse any order for any reason at any time prior to shipment, including after an order has been submitted, whether or not the order has been confirmed.")
-
-    SectionHeading("Payment")
-    Body("By providing a credit card or other payment method accepted by ArcisAI, you represent and warrant that you are authorized to use the designated payment method and that you authorize us (or our third-party payment processor) to charge your payment method for the total amount of your order (including any applicable taxes and other charges). If the payment method you provide cannot be verified, is invalid or is otherwise not acceptable, your order may be suspended or cancelled.")
-
-    SectionHeading("Subscription Services")
-    Bullet("Subscription Plans: We offer different subscription plans for our Subscription Services. For more information, please visit https://www.ambicam.in/support.")
-    Bullet("Continuous Subscriptions: When you purchase any of our Subscription Services, you expressly acknowledge and agree that (1) ArcisAI is authorized to charge you a monthly or annual subscription service fee depending on the billing cycle you choose for as long as your subscription continues, and (2) your subscription is continuous until you cancel it or such Subscription Service is suspended, discontinued, or terminated in accordance with ArcisAI's Terms of Service.")
-    Bullet("Cancellations and Refunds: You may cancel your Subscription Services at any time by logging into your ArcisAI Account and selecting \"Cancel Subscription.\" Note that merely unpairing a Product from a Subscription Service will not trigger cancellation. In the event you cancel a Subscription Service, we will provide a prorated refund for the period of time starting the day after cancellation through the remainder of your billing cycle.")
-    Bullet("Free Trials: We may offer free trials of our Subscription Services for limited periods of time. We have no obligation to notify you when your free trial ends, and we reserve the right to modify or terminate free trials at any time, without notice and in our sole discretion.")
-
-    SectionHeading("Availability and Pricing")
-    Body("All Products offered on the Store are subject to availability, and we reserve the right to impose quantity limits on any order, to reject all or part of an order and to discontinue offering certain Products and/or Subscription Services without prior notice. Prices for the Products and Subscription Services are subject to change at any time, but changes will not affect any order for Products you have already placed.")
-
-    SectionHeading("Sales Tax")
-    Body("Depending on the order, ArcisAI calculates and charges sales tax as prescribed in accordance with applicable laws in states, country.")
-
-    SectionHeading("Resale and Title Transfer")
-    Body("Purchases made on the Store are intended for end users only, and are not authorized for resale. Title for Products purchased from the Store passes to the purchaser at the time of delivery by ArcisAI to the freight carrier, but ArcisAI and/or the freight carrier will be responsible for any Product loss or damage that occurs when the Product is in transit to you.")
-
-    SectionHeading("Shipping and Delivery")
-    Body("Prices for the Products do not include shipping costs. Our delivery charges and methods are as described on the Store website from time to time. The estimated arrival or delivery date is not a guaranteed delivery date for your order. Refused deliveries will be returned to our warehouse. It may take up to 30 days for the returned items to be identified as refused and processed for a refund. The Products available on the Store have been designed, marketed and sold for use by residents of the Country of India. All safety warnings, information, instructions, packaging, in-box materials, mobile apps, and support services are provided only in English (U.S.). You are responsible for complying with all applicable laws and regulations of the country for which the Product is destined.")
-
-    SectionHeading("Installation")
-    Body("There may be laws in the jurisdiction that you install a particular Product applicable to where and how to install that Product. You should check that you are in compliance with all relevant laws in your jurisdiction. ArcisAI is not responsible for any injury or damage caused by self-installation. ArcisAI maintains a list of recommended installers of the Products on its website. These installers are not ArcisAI employees and are not affiliated with ArcisAI. ArcisAI is not responsible for any conduct of or liability associated with these installers.")
-
-    SectionHeading("Returns")
-    Body("If you want to return the Product you purchased from the Store for a refund, you must notify us no later than 30 days following the date of purchase (the \"Cancellation Period\"). To initiate a return, you must inform us of your decision within the Cancellation Period by contacting ArcisAI customer support and clearly stating your desire to return the Product. ArcisAI customer service will provide you with a Return Materials Authorization (\"RMA\") that must be included with your return shipment to ArcisAI so ArcisAI can identify your shipment and with a return address.")
-    Body("You must return your Product (and any promotional merchandise supplied with the Product) with an RMA within the 14 days following the day on which you notify ArcisAI customer support that you desire to return your Product. The Product is not eligible for a return after the 30-day period.")
-
-    SectionHeading("Disputes and Arbitration")
-    Bullet("Contact ArcisAI First: If a dispute arises between you and ArcisAI, our goal is to learn about and address your concerns. You agree that you will notify ArcisAI about any dispute you have with ArcisAI regarding these Terms & Conditions by contacting ArcisAI.")
-    Bullet("Binding Arbitration: You and ArcisAI agree to submit any claim, dispute, action, cause of action, issue, or request for relief arising out of or relating to these Terms & Conditions or your use of the Products and/or Subscription Services to binding arbitration rather than by filing any lawsuit in any forum other than set forth in this section. You also waive your right to any form of appeal, review, or recourse to any court or other judicial authority, insofar as such waiver may be validly made.")
-    Bullet("Arbitration Procedures: You must first present any claim or dispute to ArcisAI by contacting us to allow us an opportunity to resolve the dispute. You may request arbitration if your claim or dispute cannot be resolved within 60 days. The arbitration of any dispute or claim shall be conducted in accordance with the then current and applicable rules of the Indian Arbitration laws. The place of any arbitration will be Ahmedabad, Gujarat, India, and will be conducted in the English language. Claims will be heard by a single arbitrator.")
-    Bullet("No Class Actions: There shall be no right or authority for any claims subject to this arbitration section to be arbitrated on a class action or consolidated basis or on bases involving claims brought in a purported representative capacity on behalf of the general public.")
-    Bullet("Fees and Expenses: All administrative fees and expenses of arbitration will be divided equally between you and ArcisAI. Each party will bear the expense of its own counsel, experts, witnesses, and preparation and presentation of evidence at the arbitration hearing.")
-    Bullet("Time Limit for Claims: You must contact ArcisAI within one (1) year of the date of the occurrence of the event or facts giving rise to a dispute, or you waive the right to pursue any claim based upon such event, facts, or dispute.")
-    Bullet("Protection of Confidentiality and Intellectual Property Rights: Notwithstanding the foregoing, ArcisAI may seek injunctive or other equitable relief to protect its confidential information and intellectual property rights or to prevent loss of data or damage to its servers in any court of competent jurisdiction.")
-
-    SectionHeading("Warranties and Disclaimers")
-    Body("As far as permitted by applicable law, the Store, and all content available on the Store, is provided on an \"as-is\" basis without warranties or conditions of any kind, either express or implied, including, without limitation, warranties of title or implied warranties of merchantability or fitness for a particular purpose. All products and services purchased through the Store are provided on an \"as-is\" basis unless otherwise noted in the Limited Warranty included with a Product.")
-    Body("You use our Products and Subscription Services at your own discretion and risk. You will be solely responsible for (and ArcisAI disclaims) any and all loss, liability or damages resulting from your use of a Product and/or Subscription Service, including damage or loss to your HVAC system, plumbing, home, Product, other peripherals connected to the Product, computer, mobile device, and all other items and pets in your home. Unless explicitly promising a \"guarantee,\" ArcisAI does not guarantee or promise any specific level of energy savings or other monetary benefit from the use of a Product and/or Subscription Services.")
-    Body("ArcisAI gives no warranty regarding the life of the batteries used in a Product. Actual battery life may vary depending on a number of factors, including the configuration and usage of a Product.")
-
-    SectionHeading("Limitation of Liability")
-    Body("Nothing in these Terms & Conditions and in particular within this \"Limitation of Liability\" section shall attempt to exclude or limit liability that cannot be excluded under applicable law.")
-    Body("To the maximum extent permitted by applicable law, in no event will (a) ArcisAI be liable for any indirect, consequential, exemplary, special, or incidental damages, including any damages for lost data or lost profits, arising from or relating to the products, even if ArcisAI knew or should have known of the possibility of such damages, and (b) ArcisAI's total cumulative liability arising from or related to the products, whether in contract or tort or otherwise, exceed the fees actually paid by you to ArcisAI or ArcisAI's authorized reseller for the product at issue in the prior six (6) months (if any). This limitation is cumulative and will not be increased by the existence of more than one incident or claim. ArcisAI disclaims all liability of any kind of ArcisAI's licensors and suppliers.")
-
-    SectionHeading("Data Protection")
-    Body("By placing an order for Products and/or Subscription Services, you agree and understand that ArcisAI may store, share, process and use data collected from your order form or phone/fax/email order for the purposes of processing the order. ArcisAI may also share such data globally with its subsidiaries and affiliates. ArcisAI companies shall protect your information in accordance with the Website Privacy Policy. ArcisAI works with other companies that help ArcisAI provide Products to you, such as freight carriers and credit card processing companies, and ArcisAI may have to share certain information with these companies for this purpose.")
-
-    SectionHeading("Electronic Communications")
-    Body("You are communicating with ArcisAI electronically when you use the Store or send email to ArcisAI. You agree that all agreements, notices, disclosures and other communications that we provide to you electronically satisfy any legal requirement that such communications be in writing. When you order in the Store, we collect and store your email address. From that point forward, your email address is used to send you information about ArcisAI's products and services unless you opt-out of such emails using the opt-out link in the emails.")
-
-    SectionHeading("Notifications")
-    Body("ArcisAI may provide notifications to you as required by law or for marketing or other purposes via (at its option) email to the primary email associated with your ArcisAI account, hard copy, or posting of such notice on the ArcisAI website. ArcisAI is not responsible for any automatic filtering you or your network provider may apply to email notifications. ArcisAI recommends that you add @adiance.com URLs to your email address book to help ensure you receive email notifications from ArcisAI.")
-
-    SectionHeading("Force Majeure")
-    Body("We will not be liable or responsible for any failure to perform, or delay in performance of, any of our obligations under a contract that is caused by an act or event beyond our reasonable control, including without limitation acts of God, strikes, lock-outs or other industrial action by third parties, civil commotion, riot, terrorist attack, war, fire, explosion, storm, flood, earthquake, epidemic or other natural disaster, failure of public or private telecommunications networks or impossibility of the use of railways, shipping, aircraft, motor transport or other means of public or private transport.")
-
-    SectionHeading("Severability")
-    Body("If any part of these Terms & Conditions becomes illegal, invalid, unenforceable, or prohibited in any respect under any applicable law or regulation, such provision or part thereof will be deemed to not form part of the contract between us. The legality, validity or enforceability of the remainder of these Terms & Conditions will remain in full force and effect.")
-
-    SectionHeading("Survivability")
-    Body("The obligations in Sections 1 of the act will survive any expiration or termination of these Terms.")
-
-    SectionHeading("Waiver")
-    Body("Failure or delay by us to enforce any of these Terms & Conditions will not constitute a waiver of our rights against you and does not affect our right to require future performance thereof.")
-
-    SectionHeading("Governing Law and Jurisdiction")
-    Body("These Terms & Conditions are governed by the laws of Country of India without giving effect to any conflict of laws principles that may provide the application of the law of another jurisdiction. You agree to submit to the personal jurisdiction of the state and federal courts in or for Ahmedabad, Gujarat, India, for the purpose of litigating all such claims or disputes, unless such claim or dispute is required to be arbitrated as set forth in an above section.")
-}
-
-@Composable
-private fun WarrantyPolicyContent() {
-    SubBody("LAST UPDATED: January 25th 2021")
-    Body("At Ambiplatforms LLC, we deeply value your trust in us and are committed to making your shopping experience as seamless and delightful as possible.")
-    Body("We assure you that all products sold on ArcisAI are brand new and 100% genuine. If the product you receive is damaged, defective, or not as described, our Friendly Returns Policy is here to help.")
-
-    SectionHeading("Replacement Guarantee")
-    Bullet("Validity: 30 days from delivery")
-    Bullet("Covers: Damaged, Defective, Not as Described")
-    Bullet("Resolution: Replacement")
-    Body("If your product meets the above criteria, you can request a replacement within 30 days of delivery at no additional cost.")
-
-    SectionHeading("When Does the Guarantee Not Apply?")
-    Bullet("Damages caused by misuse of the product or incidental damage due to malfunction.")
-    Bullet("Products with tampered or missing serial numbers.")
-    Bullet("Items returned without original packaging, freebies, or accessories.")
-    Bullet("Damages or defects not covered under ArcisAI's warranty.")
-
-    SectionHeading("Possible Resolutions")
-    Body("If a replacement cannot be provided due to unavailability of stock, you will receive a full refund \u2014 no questions asked.")
-
-    SectionHeading("Important Notes")
-    Bullet("For replacements, you are responsible for the shipping costs associated with returning the product to us.")
-    Bullet("Replacements are subject to stock availability.")
-    Body("Your satisfaction is our top priority, and we are here to ensure your experience with ArcisAI is hassle-free. For any issues, feel free to reach out to our support team.")
 }
 
 @Composable

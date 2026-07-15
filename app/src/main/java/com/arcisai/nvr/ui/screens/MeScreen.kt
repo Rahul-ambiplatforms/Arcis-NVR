@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Help
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -52,7 +53,7 @@ fun MeScreen(
     var nav by remember { mutableStateOf(MeNav.Profile) }
     var showChangePassword by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
-    var showPrivacyPolicy by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
 
     when (nav) {
         MeNav.Profile -> ProfilePage(
@@ -63,7 +64,7 @@ fun MeScreen(
             onSystemPrivacy = { nav = MeNav.SystemPrivacy },
             onChangePassword = { showChangePassword = true },
             onHelp = { showHelp = true },
-            onPrivacyPolicy = { showPrivacyPolicy = true },
+            onAboutArcis = { showAbout = true },
         )
         MeNav.LoginActivity -> LoginActivityPage(
             vm = vm,
@@ -90,13 +91,8 @@ fun MeScreen(
             text = { Text("For assistance with your NVR or Arcis account, contact:\nsupport@arcisai.com") },
         )
     }
-    if (showPrivacyPolicy) {
-        AlertDialog(
-            onDismissRequest = { showPrivacyPolicy = false },
-            confirmButton = { TextButton(onClick = { showPrivacyPolicy = false }) { Text("Close") } },
-            title = { Text("Privacy Policy") },
-            text = { Text("ArcisAI collects minimal data to operate the NVR service. Camera feeds are not stored on Arcis servers. We do not sell your personal data. For the full policy, visit arcisai.com/privacy.") },
-        )
+    if (showAbout) {
+        AboutArcisAISheet(onDismiss = { showAbout = false })
     }
 }
 
@@ -112,7 +108,7 @@ private fun ProfilePage(
     onSystemPrivacy: () -> Unit,
     onChangePassword: () -> Unit,
     onHelp: () -> Unit,
-    onPrivacyPolicy: () -> Unit,
+    onAboutArcis: () -> Unit,
 ) {
     val name = vm.accountName
     val email = vm.accountEmail
@@ -196,9 +192,9 @@ private fun ProfilePage(
                 ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
                     MeNavRow("NVR Settings", Icons.Default.Settings, onClick = onOpenNvrSettings)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
-                    MeNavRow("Help", Icons.AutoMirrored.Filled.Help, onClick = onHelp)
+                    MeNavRow("About ArcisAI", Icons.Outlined.Info, onClick = onAboutArcis)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
-                    MeNavRow("Privacy Policy", Icons.Default.Security, onClick = onPrivacyPolicy)
+                    MeNavRow("Help", Icons.AutoMirrored.Filled.Help, onClick = onHelp)
                     HorizontalDivider(Modifier.padding(start = 56.dp))
                     MeNavRow("System Privacy Settings", Icons.Default.AdminPanelSettings, onClick = onSystemPrivacy)
                 }

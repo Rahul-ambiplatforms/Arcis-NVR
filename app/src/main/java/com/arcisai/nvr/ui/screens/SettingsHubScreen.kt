@@ -49,7 +49,6 @@ fun SettingsHubScreen(
     }
 
     var showRebootConfirm by remember { mutableStateOf(false) }
-    var showAbout         by remember { mutableStateOf(false) }
     var showVolumeDialog  by remember { mutableStateOf(false) }
     var showRenameDialog  by remember { mutableStateOf(false) }
     var alertVolume       by remember { mutableStateOf(80) }
@@ -170,11 +169,7 @@ fun SettingsHubScreen(
             item { HubSectionHeader("About") }
             item {
                 SettingsGroup {
-                    NavRow("About ArcisAI",
-                        "Company, privacy, terms & warranty",
-                        Icons.Default.Info) { showAbout = true }
-                    GroupDivider()
-                    NavRow("About Device", null, Icons.Default.Router) { onAboutDevice() }
+                    NavRow("About Device", null, Icons.Default.Info) { onAboutDevice() }
                 }
             }
 
@@ -273,11 +268,6 @@ fun SettingsHubScreen(
                 }
             }
         }
-    }
-
-    // ── About ArcisAI sheet ────────────────────────────────────────────────────
-    if (showAbout) {
-        AboutArcisAISheet(onDismiss = { showAbout = false })
     }
 
     // ── Alert Volume dialog ────────────────────────────────────────────────────

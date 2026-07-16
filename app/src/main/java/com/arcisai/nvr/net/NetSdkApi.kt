@@ -68,6 +68,26 @@ class NetSdkApi(val creds: NvrCredentials) {
         }
     }
 
+    suspend fun post(path: String, jsonBody: String = ""): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(urlOf(path))
+            .post(jsonBody.toRequestBody(JSON_CT))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw NetSdkException(resp.code, body)
+            body
+        }
+    }
+
+    /** Delete a channel's camera binding — mirrors the NVR web UI's `DelIPC`:
+     *  POST /netsdk/Channel/IPCamInfo/<id> with {"Channel":"<id>","Enable":"False"}.
+     *  This is the firmware's real "remove channel" op; clearing the IPCamInfo
+     *  object via PUT does NOT delete (the slot re-populates). */
+    suspend fun delIpc(channelId: Int): String =
+        post("/netsdk/Channel/IPCamInfo/$channelId",
+            JSONObject().put("Channel", channelId.toString()).put("Enable", "False").toString())
+
     suspend fun getJson(path: String): JSONObject = JSONObject(get(path))
     suspend fun getJsonArray(path: String): JSONArray = JSONArray(get(path))
     suspend fun putJson(path: String, body: JSONObject): JSONObject =

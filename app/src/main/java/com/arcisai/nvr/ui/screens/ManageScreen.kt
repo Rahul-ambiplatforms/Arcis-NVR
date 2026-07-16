@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Info
@@ -51,12 +52,16 @@ fun ManageScreen(vm: NvrViewModel) {
     var addingThirdParty by remember { mutableStateOf(false) }
     var showAddInfo   by remember { mutableStateOf(false) }
     var showFoundInfo by remember { mutableStateOf(false) }
+    var showRemoveOffline by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Cameras", fontWeight = FontWeight.SemiBold) },
                 actions = {
+                    IconButton(onClick = { showRemoveOffline = true }) {
+                        Icon(Icons.Default.DeleteSweep, contentDescription = "Remove offline channels")
+                    }
                     IconButton(onClick = { vm.loadIpCamInfo() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
@@ -108,15 +113,7 @@ fun ManageScreen(vm: NvrViewModel) {
                             status = vm.channelStatus[cid],
                             duplicateOf = ipDup[cid],
                             onEdit  = { editing = obj },
-                            onClear = {
-                                vm.saveIpCamEntry(
-                                    obj.optInt("ID"),
-                                    mapOf(
-                                        "IPAddr" to "", "Username" to "", "Password" to "",
-                                        "Modelname" to "", "Enable" to "False",
-                                    ),
-                                )
-                            },
+                            onClear = { vm.clearIpCamEntry(obj.optInt("ID")) },
                         )
                     }
                 }
@@ -234,6 +231,28 @@ fun ManageScreen(vm: NvrViewModel) {
             icon = { Icon(Icons.Outlined.Info, contentDescription = null) },
             title = { Text("No camera found") },
             text = { Text(msg) },
+        )
+    }
+    if (showRemoveOffline) {
+        AlertDialog(
+            onDismissRequest = { showRemoveOffline = false },
+            icon = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
+            title = { Text("Remove offline channels") },
+            text = {
+                Text(
+                    "This removes every channel that isn't currently online — all the " +
+                    "\"Connecting…\"/offline slots — and keeps the working (online) ones.\n\n" +
+                    "Note: an N1 camera that's still powered on and paired to this NVR may be " +
+                    "re-added automatically by the NVR."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRemoveOffline = false
+                    vm.clearAllOfflineChannels()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showRemoveOffline = false }) { Text("Cancel") } },
         )
     }
     if (showAddInfo) {

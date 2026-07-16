@@ -1315,6 +1315,62 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Remove a camera from a channel slot using the firmware's real delete op
+     *  (`DelIPC` — POST /netsdk/Channel/IPCamInfo/<id> {"Channel","Enable":"False"}),
+     *  exactly what the NVR web UI's "Delete Channel" button does. The old
+     *  approach (PUT the IPCamInfo object with blank fields) does NOT delete —
+     *  the firmware re-populates the slot, which is why it "came back".
+     *
+     *  Caveat still applies for N1 cameras wireless-paired to the NVR's own AP:
+     *  if the camera is powered on and paired, the NVR can re-add it. */
+    fun clearIpCamEntry(channelId: Int) {
+        val a = api ?: return
+        viewModelScope.launch {
+            try {
+                ipCamInfoStatus = "Removing channel ${channelId + 1}…"
+                val resp = a.delIpc(channelId)
+                android.util.Log.i("NvrViewModel", "delIpc ch$channelId -> $resp")
+                loadIpCamInfo()
+                loadConnectedChannels()
+                ipCamInfoStatus = "Removed channel ${channelId + 1}."
+            } catch (t: Throwable) {
+                android.util.Log.w("NvrViewModel", "delIpc ch$channelId failed: ${t.message}")
+                ipCamInfoStatus = "Remove failed: ${t.message}"
+            }
+        }
+    }
+
+    /** Bulk-remove every channel that has a camera bound but isn't currently
+     *  online — i.e. all the "Connecting…"/offline slots — leaving the working
+     *  (online) channels untouched. Uses the same DelIPC op as single delete. */
+    fun clearAllOfflineChannels() {
+        val a = api ?: return
+        val arr = ipCamInfo ?: return
+        viewModelScope.launch {
+            try {
+                val targets = (0 until arr.length())
+                    .map { arr.getJSONObject(it) }
+                    .filter { it.optString("IPAddr").isNotBlank() }
+                    .map { it.optInt("ID") }
+                    .filter { id -> connectedChannels?.contains(id) != true }  // keep online ones
+                if (targets.isEmpty()) {
+                    ipCamInfoStatus = "No offline channels to remove."
+                    return@launch
+                }
+                ipCamInfoStatus = "Removing ${targets.size} offline channel(s)…"
+                for (id in targets) {
+                    runCatching { a.delIpc(id) }
+                        .onFailure { android.util.Log.w("NvrViewModel", "delIpc $id failed: ${it.message}") }
+                }
+                loadIpCamInfo()
+                loadConnectedChannels()
+                ipCamInfoStatus = "Removed ${targets.size} offline channel(s)."
+            } catch (t: Throwable) {
+                ipCamInfoStatus = "Bulk remove failed: ${t.message}"
+            }
+        }
+    }
+
     fun rebootIpc(channelId: Int) {
         val a = api ?: return
         viewModelScope.launch {

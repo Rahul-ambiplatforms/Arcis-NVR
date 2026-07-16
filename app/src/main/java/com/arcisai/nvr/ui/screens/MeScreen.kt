@@ -88,7 +88,7 @@ fun MeScreen(
             onDismissRequest = { showHelp = false },
             confirmButton = { TextButton(onClick = { showHelp = false }) { Text("OK") } },
             title = { Text("Help") },
-            text = { Text("For assistance with your NVR or Arcis account, contact:\nsupport@arcisai.com") },
+            text = { Text("For assistance with your NVR or Arcis account, contact:\ntech.support@adiance.com") },
         )
     }
     if (showAbout) {

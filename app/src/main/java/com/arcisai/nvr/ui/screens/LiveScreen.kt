@@ -292,25 +292,75 @@ fun LiveScreen(
                 .background(Color.Black)
                 .systemBarsPadding(),
         ) {
-            LiveChannelGrid(
-                modifier = Modifier.fillMaxSize(),
-                channels = viewModel.channels,
-                selectedChannel = selectedChannel,
-                connectedChannels = viewModel.connectedChannels,
-                channelStatus = viewModel.channelStatus,
-                forceTcp = forceTcp,
-                remoteMode = remoteMode,
-                useSub = useSub,
-                audioMuted = audioMuted,
-                viewModel = viewModel,
-                onChannelTap = { selectedChannel = it },
-                onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
-                snapshotTrigger = snapshotTrigger,
-                isRecording = isRecording,
-                onRecordSaved = { name ->
-                    coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
-                },
-            )
+            // Same 2×2 paged layout as the portrait grid: 4 channels per page,
+            // swipe left/right for the next 4 (8 ch → 2 pages, 16 ch → 4 pages)
+            // instead of cramming all 16 into a tiny 4×4.
+            val fsChannels = viewModel.channels
+            val fsGroups = fsChannels.chunked(4).let { if (it.isEmpty()) listOf(emptyList()) else it }
+            val fsPageCount = fsGroups.size
+            if (fsPageCount <= 1) {
+                LiveChannelGrid(
+                    modifier = Modifier.fillMaxSize(),
+                    channels = fsGroups.first(),
+                    selectedChannel = selectedChannel,
+                    connectedChannels = viewModel.connectedChannels,
+                    channelStatus = viewModel.channelStatus,
+                    forceTcp = forceTcp,
+                    remoteMode = remoteMode,
+                    useSub = useSub,
+                    audioMuted = audioMuted,
+                    viewModel = viewModel,
+                    onChannelTap = { selectedChannel = it },
+                    onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
+                    snapshotTrigger = snapshotTrigger,
+                    isRecording = isRecording,
+                    onRecordSaved = { name ->
+                        coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
+                    },
+                )
+            } else {
+                val fsPager = rememberPagerState(pageCount = { fsPageCount })
+                HorizontalPager(
+                    state = fsPager,
+                    modifier = Modifier.fillMaxSize(),
+                    beyondViewportPageCount = 0,
+                ) { page ->
+                    LiveChannelGrid(
+                        modifier = Modifier.fillMaxSize(),
+                        channels = fsGroups.getOrElse(page) { emptyList() },
+                        selectedChannel = selectedChannel,
+                        connectedChannels = viewModel.connectedChannels,
+                        channelStatus = viewModel.channelStatus,
+                        forceTcp = forceTcp,
+                        remoteMode = remoteMode,
+                        useSub = useSub,
+                        audioMuted = audioMuted,
+                        viewModel = viewModel,
+                        onChannelTap = { selectedChannel = it },
+                        onThumbnail = { bmp -> viewModel.setChannelThumbnail(selectedChannel, bmp) },
+                        snapshotTrigger = snapshotTrigger,
+                        isRecording = isRecording,
+                        onRecordSaved = { name ->
+                            coroutineScope.launch { snackbarHostState.showSnackbar("Saved: $name") }
+                        },
+                    )
+                }
+                // Page indicator (e.g. "2 / 4")
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        "${fsPager.currentPage + 1} / $fsPageCount",
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
             // Tap ✕ / back arrow to exit fullscreen
             IconButton(
                 onClick = { viewMode = ViewMode.GRID },
@@ -919,8 +969,12 @@ private fun ChannelGridTile(
 ) {
     val assigned = ch.ipAddr.isNotBlank()
     val online = connectedChannels?.let { ch.id in it }
-    val connecting = channelStatus[ch.id].equals("Updating", ignoreCase = true)
-    val knownOffline = assigned && online == false && !connecting
+    // Binary status on the live grid: a channel is either online (green) or
+    // offline (red). The NVR's transient "Updating" isn't a separate state here —
+    // it never resolves for unreachable cameras and the app won't stream it
+    // anyway (see isChannelOffline), so we show it as offline rather than a
+    // permanent "Connecting…".
+    val knownOffline = assigned && online == false
     val active = assigned && (online ?: ch.enabled) && !knownOffline
 
     var rtsp by remember(ch.id, ch.ipAddr, useSub) { mutableStateOf<String?>(null) }
@@ -1026,7 +1080,6 @@ private fun ChannelGridTile(
                     Text(
                         when {
                             !assigned    -> "No cam"
-                            connecting   -> "Connecting…"
                             knownOffline -> "Offline"
                             anyFailed    -> "No signal"
                             else         -> "Loading…"
@@ -1057,10 +1110,9 @@ private fun ChannelGridTile(
         // Online dot
         if (assigned) {
             val dotColor = when {
-                online == true  -> ArcisGreen
-                connecting      -> Color(0xFFE0A800)
-                online == false -> Color(0xFFE53935)
-                else            -> ArcisGray
+                online == true  -> ArcisGreen              // online → green
+                online == false -> Color(0xFFE53935)       // offline (incl. "Updating") → red
+                else            -> ArcisGray               // status not loaded yet
             }
             Box(
                 Modifier

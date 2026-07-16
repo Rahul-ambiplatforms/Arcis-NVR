@@ -258,8 +258,15 @@ private fun DeviceCard(
                 }
             }
 
+            // Channel-count subtitle — how many slots have a camera assigned.
+            Text(
+                "${channels.count { it.ipAddr.isNotBlank() }} of ${channels.size} channels",
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             // ── Single device preview — no per-channel loading, tap to go live ──
-            val assignedCount = channels.count { it.ipAddr.isNotBlank() }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -289,22 +296,6 @@ private fun DeviceCard(
                         fontSize = 12.sp,
                         color = Color.White.copy(alpha = 0.75f),
                     )
-                }
-
-                // Channel-count badge — top-left
-                if (channels.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(4.dp),
-                        color = Color.Black.copy(alpha = 0.45f),
-                        modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                    ) {
-                        Text(
-                            "$assignedCount/${channels.size} channels",
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            fontSize = 10.sp,
-                            color = Color.White,
-                        )
-                    }
                 }
             }
 

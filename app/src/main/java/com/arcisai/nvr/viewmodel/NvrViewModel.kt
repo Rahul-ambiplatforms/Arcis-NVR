@@ -1723,7 +1723,9 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                         RecordSegment(o.optInt("Channel", channelId), s, e, o.optString("Type")))
                 }
                 recordSegments = out
-                recordSearchStatus = if (out.isEmpty()) "No recordings for that day" else null
+                recordSearchStatus = if (out.isEmpty())
+                    "No recordings for Channel ${channelId + 1} on this day.\nTry a different channel or date."
+                else null
                 android.util.Log.i("NvrViewModel", "searchRecordings ch$channelId $date -> ${out.size} segments")
             } catch (_: kotlinx.coroutines.CancellationException) {
                 // superseded by a newer search — leave status/segments as-is

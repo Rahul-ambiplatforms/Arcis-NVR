@@ -68,11 +68,20 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     private val store = CredentialStore(app)
     private val cache = ChannelCache(app)
     private val audioPrefs = app.getSharedPreferences("channel_audio_gain", android.content.Context.MODE_PRIVATE)
+    // Per-NVR custom display names, keyed by device id (or host on LAN).
+    private val namePrefs = app.getSharedPreferences("nvr_display_names", android.content.Context.MODE_PRIVATE)
     // Lazy: created on first cloud login.
     private val cloudApi: BackendApi by lazy { BackendApi.create(app) }
 
-    var credentials by mutableStateOf<NvrCredentials?>(null)
-        private set
+    private val _credentials = mutableStateOf<NvrCredentials?>(null)
+    var credentials: NvrCredentials?
+        get() = _credentials.value
+        private set(value) {
+            _credentials.value = value
+            // Whenever the active NVR changes, load its saved custom name (or the
+            // default), so each device shows its own name and edits survive restart.
+            loadDisplayNvrName(value)
+        }
     var api by mutableStateOf<NetSdkApi?>(null)
         private set
 
@@ -427,6 +436,28 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Turn a raw NVR connect failure into a short, user-facing message.
      *  Hides the "HTTP 401: …" technical text behind a plain login-invalid line. */
+    /** Short, non-technical error text for end users. NEVER exposes HTTP codes,
+     *  exception class names, hostnames, or raw server bodies. [action] is a verb
+     *  phrase describing what failed, e.g. "save the changes", "load recordings".
+     *  Technical detail still goes to logcat at each call site. */
+    private fun userError(t: Throwable?, action: String): String {
+        val raw = ((t as? NetSdkException)?.let { "code ${it.httpCode}" } ?: t?.message).orEmpty()
+        return when {
+            raw.contains("401") || raw.contains("403") || raw.contains("Unauthorized", ignoreCase = true) ->
+                "You don't have permission to $action."
+            raw.contains("timeout", ignoreCase = true) || raw.contains("timed out", ignoreCase = true) ->
+                "The NVR took too long to respond. Please try again."
+            raw.contains("ECONNREFUSED", ignoreCase = true) ||
+            raw.contains("Connection refused", ignoreCase = true) ||
+            raw.contains("Failed to connect", ignoreCase = true) ||
+            raw.contains("UnknownHost", ignoreCase = true) ||
+            raw.contains("Unable to resolve host", ignoreCase = true) ||
+            raw.contains("Network is unreachable", ignoreCase = true) ->
+                "Can't reach the NVR. Check your connection and try again."
+            else -> "Couldn't $action. Please try again."
+        }
+    }
+
     private fun friendlyLanError(t: Throwable): String {
         if (t is NetSdkException) {
             return when (t.httpCode) {
@@ -1156,7 +1187,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.i("NvrViewModel",
                     "refreshChannels: parsed=${channels.size} (padded to $maxChannels)")
             } catch (t: Throwable) {
-                channelsError = t.message
+                channelsError = userError(t, "load the cameras")
                 android.util.Log.e("NvrViewModel", "refreshChannels failed: ${t.message}", t)
             } finally {
                 channelsLoading = false
@@ -1215,7 +1246,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.i("NvrViewModel",
                     "loadIpCamInfo: raw=${raw.length()} padded=${ipCamInfo!!.length()}")
             } catch (t: Throwable) {
-                ipCamInfoError = t.message
+                ipCamInfoError = userError(t, "load the cameras")
                 android.util.Log.e("NvrViewModel", "loadIpCamInfo failed: ${t.message}", t)
             } finally {
                 ipCamInfoLoading = false
@@ -1310,7 +1341,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 loadConnectedChannels()
                 ipCamInfoStatus = "Saved channel ${channelId + 1}."
             } catch (t: Throwable) {
-                ipCamInfoStatus = "Save failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "save the camera")
             }
         }
     }
@@ -1335,7 +1366,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 ipCamInfoStatus = "Removed channel ${channelId + 1}."
             } catch (t: Throwable) {
                 android.util.Log.w("NvrViewModel", "delIpc ch$channelId failed: ${t.message}")
-                ipCamInfoStatus = "Remove failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "remove the channel")
             }
         }
     }
@@ -1366,7 +1397,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 loadConnectedChannels()
                 ipCamInfoStatus = "Removed ${targets.size} offline channel(s)."
             } catch (t: Throwable) {
-                ipCamInfoStatus = "Bulk remove failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "remove the channels")
             }
         }
     }
@@ -1378,7 +1409,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 a.rebootIpc(channelId)
                 ipCamInfoStatus = "Reboot sent to channel ${channelId + 1}"
             } catch (t: Throwable) {
-                ipCamInfoStatus = "Reboot failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "reboot the camera")
             }
         }
     }
@@ -1390,7 +1421,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 a.imageRollover(channelId, on)
                 ipCamInfoStatus = "Image rollover ${if (on) "on" else "off"} for channel ${channelId + 1}"
             } catch (t: Throwable) {
-                ipCamInfoStatus = "Rollover failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "update the image setting")
             }
         }
     }
@@ -1494,7 +1525,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 android.util.Log.i("NvrViewModel",
                     "searchIpc(): round N1=${n1.length()} ONVIF=${onvif.size} sweep=${sweep.size} → sticky=$n (round=$roundN)")
             } catch (t: Throwable) {
-                ipCamInfoStatus = "Search failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "scan for cameras")
                 android.util.Log.e("NvrViewModel", "searchIpc() failed: ${t.message}", t)
             } finally {
                 searchBusy = false
@@ -1541,7 +1572,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 refreshChannels()
                 loadConnectedChannels()
             } catch (t: Throwable) {
-                ipCamInfoStatus = "Assign failed: ${t.message}"
+                ipCamInfoStatus = userError(t, "assign the camera")
             }
         }
     }
@@ -1605,14 +1636,31 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
     var pendingPlaybackEpochSec  by mutableStateOf<Long?>(null)
 
     /** User-visible NVR display name — editable in the Device tab header and
-     *  shared with LiveScreen so both show the same title. Defaults to "Device";
-     *  updated by [setDisplayNvrName]. */
-    private var _displayNvrName by mutableStateOf("Device")
+     *  shared with LiveScreen so both show the same title. Defaults to
+     *  "NVR Device"; edits are persisted per-NVR via [setDisplayNvrName] and
+     *  reloaded on login/restart by [loadDisplayNvrName]. */
+    private val defaultNvrName = "NVR Device"
+    private var _displayNvrName by mutableStateOf(defaultNvrName)
     val displayNvrName: String get() = _displayNvrName
+
+    /** Preferences key for the current NVR's custom name (device id, else host). */
+    private fun nameKeyFor(c: NvrCredentials?): String? {
+        val id = c?.deviceId?.takeIf { it.isNotBlank() }
+            ?: c?.host?.takeIf { it.isNotBlank() }
+            ?: return null
+        return "name_$id"
+    }
 
     fun setDisplayNvrName(name: String) {
         val trimmed = name.trim()
-        if (trimmed.isNotBlank()) _displayNvrName = trimmed
+        if (trimmed.isBlank()) return
+        _displayNvrName = trimmed
+        // Persist so the rename survives app restart / re-login.
+        nameKeyFor(credentials)?.let { namePrefs.edit().putString(it, trimmed).apply() }
+    }
+
+    private fun loadDisplayNvrName(c: NvrCredentials?) {
+        _displayNvrName = nameKeyFor(c)?.let { namePrefs.getString(it, null) } ?: defaultNvrName
     }
 
     private val channelNamesMap = mutableMapOf<Int, String>()
@@ -1732,7 +1780,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 // If cancelled while the blocking HTTP call was in-flight, skip the stale status update
                 if (!isActive) return@launch
-                recordSearchStatus = "Search failed: ${t.message}"
+                recordSearchStatus = userError(t, "load recordings")
                 android.util.Log.w("NvrViewModel", "searchRecordings failed: ${t.message}")
             } finally {
                 recordSearchBusy = false
@@ -1795,7 +1843,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             } catch (_: kotlinx.coroutines.CancellationException) {
             } catch (t: Throwable) {
                 if (!isActive) return@launch
-                motionEventStatus = "Search failed: ${t.message}"
+                motionEventStatus = userError(t, "load events")
             } finally {
                 motionEventBusy = false
             }
@@ -2088,8 +2136,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 a.preset(channelId, "set", preset)
                 ptzStatus = "Preset $preset saved"
             } catch (e: Exception) {
-                val msg = (e as? NetSdkException)?.responseBody?.take(80) ?: e.message?.take(80)
-                ptzStatus = "Save failed: ${msg ?: "error"}"
+                android.util.Log.w("NvrViewModel", "ptzSetPreset failed: ${e.message}")
+                ptzStatus = userError(e, "save the preset")
             }
         }
     }
@@ -2306,7 +2354,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 kotlinx.coroutines.delay(3_000)
                 streamRefreshToken++
             } catch (t: Throwable) {
-                settingStatus = "Failed: ${t.message}"
+                settingStatus = userError(t, "apply the setting")
             }
         }
     }
@@ -2335,7 +2383,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 kotlinx.coroutines.delay(2_500)
                 streamRefreshToken++
             } catch (t: Throwable) {
-                settingStatus = "Save failed: ${t.message}"
+                settingStatus = userError(t, "save the settings")
             }
         }
     }
@@ -2393,7 +2441,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                     kotlinx.coroutines.delay(10_000)
                     sirenActive = false
                 } catch (t: Throwable) {
-                    settingStatus = "Siren failed: ${t.message}"
+                    settingStatus = userError(t, "sound the siren")
                     sirenActive = false
                 }
             }
@@ -2443,7 +2491,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 settingStatus = "Motion detection saved"
                 motionDetectionCfg = a.event()
             } catch (t: Throwable) {
-                settingStatus = "Save failed: ${t.message}"
+                settingStatus = userError(t, "save the settings")
             }
         }
     }
@@ -2468,7 +2516,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(kotlinx.coroutines.Dispatchers.Main) { onDone(true, "Device time synced") }
             } catch (t: Throwable) {
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    onDone(false, "Sync failed: ${t.message}")
+                    onDone(false, userError(t, "sync the time"))
                 }
             }
         }
@@ -2512,7 +2560,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 logsCfg = JSONObject(a.logSearch(netsdkEnvelope("LogSearch", param)))
                 settingStatus = null
             } catch (t: Throwable) {
-                settingStatus = "Log search failed: ${t.message}"
+                settingStatus = userError(t, "load the logs")
             }
         }
     }
@@ -2542,7 +2590,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 settingStatus = "Password updated"
                 onDone(true)
             } catch (t: Throwable) {
-                settingStatus = "Update failed: ${t.message}"
+                settingStatus = userError(t, "save the changes")
                 onDone(false)
             }
         }
@@ -2563,17 +2611,14 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             perChannelColorFailed = perChannelColorFailed - channelId
             try {
                 val pub = publisher() ?: run {
-                    settingStatus = "Publisher unreachable"
+                    settingStatus = "Can't reach the NVR. Please try again."
                     perChannelColorFailed = perChannelColorFailed + channelId
                     return@launch
                 }
                 val obj = pub.imageGet(channelId)
                 perChannelColor = perChannelColor.toMutableMap().apply { put(channelId, obj) }
-            } catch (t: NetSdkException) {
-                settingStatus = "Camera ${channelId + 1} image read failed: HTTP ${t.httpCode}"
-                perChannelColorFailed = perChannelColorFailed + channelId
             } catch (t: Throwable) {
-                settingStatus = "Camera ${channelId + 1} image read failed: ${t.message}"
+                settingStatus = userError(t, "load the image settings")
                 perChannelColorFailed = perChannelColorFailed + channelId
             }
         }
@@ -2583,39 +2628,19 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val pub = publisher() ?: run {
-                    settingStatus = "Publisher unreachable"
+                    settingStatus = "Can't reach the NVR. Please try again."
                     return@launch
                 }
                 val echoed = pub.imageSet(channelId, settings)
                 perChannelColor = perChannelColor.toMutableMap().apply { put(channelId, echoed) }
                 settingStatus = "Camera ${channelId + 1} image saved"
-            } catch (t: NetSdkException) {
-                settingStatus = "Camera ${channelId + 1}: Save failed (HTTP ${t.httpCode})"
             } catch (t: Throwable) {
-                settingStatus = "Camera ${channelId + 1}: ${sanitizeError(t.message)}"
+                settingStatus = userError(t, "save the camera settings")
             }
         }
     }
 
     var settingsLoading by mutableStateOf(false)
-
-    private fun sanitizeError(msg: String?): String {
-        if (msg == null) return "Unexpected error"
-        return when {
-            msg.contains("127.0.0.1") || msg.contains("unexpected end", ignoreCase = true) ||
-            msg.contains("ECONNREFUSED") || msg.contains("Connection refused", ignoreCase = true) ||
-            msg.contains("failed to connect", ignoreCase = true) ->
-                "Connection error — check NVR network"
-            msg.contains("timeout", ignoreCase = true) ||
-            msg.contains("timed out", ignoreCase = true) ||
-            msg.contains("SocketTimeoutException", ignoreCase = true) ->
-                "Request timed out — NVR may be busy"
-            msg.contains("HTTP 401") || msg.contains("Unauthorized", ignoreCase = true) ->
-                "Authentication failed — check NVR credentials"
-            msg.length > 80 -> msg.take(80) + "…"
-            else -> msg
-        }
-    }
 
     private fun <T> launchBlock(load: suspend () -> T?, onValue: (T) -> Unit) {
         viewModelScope.launch {
@@ -2623,7 +2648,8 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 load()?.let(onValue)
             } catch (t: Throwable) {
-                settingStatus = sanitizeError(t.message)
+                android.util.Log.w("NvrViewModel", "load failed: ${t.message}")
+                settingStatus = userError(t, "load the settings")
             } finally {
                 settingsLoading = false
             }
@@ -2639,7 +2665,7 @@ class NvrViewModel(app: Application) : AndroidViewModel(app) {
                 settingStatus = okMessage
                 then()
             } catch (t: Throwable) {
-                settingStatus = "Failed: ${sanitizeError(t.message)}"
+                settingStatus = userError(t, "save the settings")
             } finally {
                 settingsLoading = false
             }

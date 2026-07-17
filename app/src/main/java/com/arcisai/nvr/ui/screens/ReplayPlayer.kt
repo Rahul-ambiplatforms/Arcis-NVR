@@ -114,7 +114,8 @@ private class ReplayController(
             }
         } catch (_: InterruptedException) {
         } catch (t: Throwable) {
-            if (running) onStatus("Decode error: ${t.message}")
+            android.util.Log.w("ReplayPlayer", "decode error: ${t.message}")
+            if (running) onStatus("Couldn't play this recording. Please try again.")
         } finally {
             runCatching { codec?.stop() }
             runCatching { codec?.release() }

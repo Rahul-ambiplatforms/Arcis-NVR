@@ -156,7 +156,7 @@ fun LiveTabScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val saved = editDraft.trim().ifBlank { "Device" }
+                    val saved = editDraft.trim().ifBlank { "NVR Device" }
                     displayName = saved
                     vm.setDisplayNvrName(saved)
                     showEditDialog = false

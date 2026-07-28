@@ -104,7 +104,10 @@ if ($confirm -notmatch '^[Yy]$') {
 $updated = [regex]::Replace($content, 'versionCode(\s*=\s*)\d+', "versionCode`${1}$newCode")
 $updated = [regex]::Replace($updated, 'versionName(\s*=\s*)"[^"]+"', 'versionName${1}"' + $newName + '"')
 
-Set-Content -Path $GradleFile -Value $updated -NoNewline -Encoding UTF8
+# Write UTF-8 *without* a BOM. Set-Content -Encoding UTF8 on Windows
+# PowerShell 5.1 always emits a BOM, which then sits at the top of
+# build.gradle.kts and shows up as a spurious diff on every release.
+[System.IO.File]::WriteAllText($GradleFile, $updated, (New-Object System.Text.UTF8Encoding $false))
 Write-Host "Updated app/build.gradle.kts" -ForegroundColor Green
 
 Push-Location $RepoRoot

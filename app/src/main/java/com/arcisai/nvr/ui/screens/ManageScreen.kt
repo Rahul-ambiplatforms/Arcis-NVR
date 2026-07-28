@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -12,8 +13,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -30,6 +33,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.arcisai.nvr.ui.theme.ArcisGreen
 import com.arcisai.nvr.viewmodel.NvrViewModel
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,17 +41,27 @@ import org.json.JSONObject
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ManageScreen(vm: NvrViewModel) {
-    LaunchedEffect(Unit) { vm.loadIpCamInfo() }
+    LaunchedEffect(Unit) { vm.loadIpCamInfo(); vm.loadConnectedChannels() }
+    // Keep the online/offline badges fresh while this screen is open.
+    LaunchedEffect(Unit) {
+        while (true) { kotlinx.coroutines.delay(8000); vm.loadConnectedChannels() }
+    }
 
     var editing       by remember { mutableStateOf<JSONObject?>(null) }
     var pickingForFound by remember { mutableStateOf<JSONObject?>(null) }
     var addingThirdParty by remember { mutableStateOf(false) }
+    var showAddInfo   by remember { mutableStateOf(false) }
+    var showFoundInfo by remember { mutableStateOf(false) }
+    var showRemoveOffline by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Cameras", fontWeight = FontWeight.SemiBold) },
                 actions = {
+                    IconButton(onClick = { showRemoveOffline = true }) {
+                        Icon(Icons.Default.DeleteSweep, contentDescription = "Remove offline channels")
+                    }
                     IconButton(onClick = { vm.loadIpCamInfo() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                     }
@@ -74,35 +88,39 @@ fun ManageScreen(vm: NvrViewModel) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp))
                 } }
             } else {
+                // Flag channels that share the same camera IP (a camera bound to
+                // two channels) so duplicates are obvious in the list.
+                val ipDup = HashMap<Int, Int>()
+                run {
+                    val seen = HashMap<String, Int>()
+                    for (j in 0 until arr.length()) {
+                        val o = arr.getJSONObject(j)
+                        val ipv = o.optString("IPAddr")
+                        if (ipv.isBlank()) continue
+                        val id = o.optInt("ID", j)
+                        val prev = seen[ipv]
+                        if (prev != null) { ipDup[id] = prev; ipDup.putIfAbsent(prev, id) }
+                        else seen[ipv] = id
+                    }
+                }
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
                     item(key = "slot-${obj.optInt("ID", i)}") {
+                        val cid = obj.optInt("ID", i)
                         ChannelRow(
                             obj = obj,
+                            online = vm.connectedChannels?.let { cid in it },
+                            status = vm.channelStatus[cid],
+                            duplicateOf = ipDup[cid],
                             onEdit  = { editing = obj },
-                            onClear = {
-                                vm.saveIpCamEntry(
-                                    obj.optInt("ID"),
-                                    mapOf(
-                                        "IPAddr" to "", "Username" to "", "Password" to "",
-                                        "Modelname" to "", "Enable" to "False",
-                                    ),
-                                )
-                            },
+                            onClear = { vm.clearIpCamEntry(obj.optInt("ID")) },
                         )
                     }
                 }
             }
 
             item { Spacer(Modifier.height(8.dp)) }
-            item { SectionHeader("Add by IP") }
-            item {
-                HintRow(
-                    "Scan LAN finds every ONVIF camera on the network (Hikvision, Dahua, " +
-                    "CP Plus, Axis, Vivotek, …) plus N1 cameras. Use this for any camera " +
-                    "that isn't on the network yet, or that doesn't advertise via ONVIF."
-                )
-            }
+            item { SectionHeader("Add by IP", onInfo = { showAddInfo = true }) }
             item {
                 Surface(
                     modifier = Modifier
@@ -119,22 +137,24 @@ fun ManageScreen(vm: NvrViewModel) {
                         Icon(Icons.Default.Add, contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
-                        Text("Add by IP (Hikvision / Dahua / ONVIF / RTSP)",
-                            fontWeight = FontWeight.SemiBold)
+                        Text("Add by IP", fontWeight = FontWeight.SemiBold)
                     }
                 }
             }
 
             item { Spacer(Modifier.height(8.dp)) }
-            item { SectionHeader("Found on LAN") }
+            item {
+                SectionHeader("Found on LAN", onInfo = { showFoundInfo = true }, action = if (vm.searchResults != null) {
+                    { TextButton(onClick = { vm.clearSearchResults() }) { Text("Clear") } }
+                } else null)
+            }
             val found = vm.searchResults
             when {
                 vm.searchBusy && found == null ->
                     item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     } }
-                found == null ->
-                    item { HintRow("Tap “Scan LAN” to discover N1 + ONVIF cameras (any brand) on this network.") }
+                found == null -> {}  // hint is in the ⓘ info popup on the section header
                 found.length() == 0 ->
                     item { HintRow("No cameras found. Make sure the camera is powered on and on this Wi-Fi.") }
                 else -> {
@@ -183,7 +203,10 @@ fun ManageScreen(vm: NvrViewModel) {
             initial = obj,
             onDismiss = { editing = null },
             onSave = { edits ->
-                vm.saveIpCamEntry(obj.optInt("ID"), edits) { editing = null }
+                // Close the dialog immediately; the save + connect resolves in
+                // the background (status shows on the Cameras screen).
+                editing = null
+                vm.saveIpCamEntry(obj.optInt("ID"), edits)
             },
         )
     }
@@ -195,10 +218,72 @@ fun ManageScreen(vm: NvrViewModel) {
                 slots = arr,
                 onDismiss = { pickingForFound = null },
                 onPick = { channelId ->
-                    vm.assignToChannel(channelId, f) { pickingForFound = null }
+                    pickingForFound = null
+                    vm.assignToChannel(channelId, f)
                 },
             )
         }
+    }
+    vm.cameraAddMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { vm.cameraAddMessage = null },
+            confirmButton = { TextButton(onClick = { vm.cameraAddMessage = null }) { Text("OK") } },
+            icon = { Icon(Icons.Outlined.Info, contentDescription = null) },
+            title = { Text("No camera found") },
+            text = { Text(msg) },
+        )
+    }
+    if (showRemoveOffline) {
+        AlertDialog(
+            onDismissRequest = { showRemoveOffline = false },
+            icon = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
+            title = { Text("Remove offline channels") },
+            text = {
+                Text(
+                    "This removes every channel that isn't currently online — all the " +
+                    "\"Connecting…\"/offline slots — and keeps the working (online) ones.\n\n" +
+                    "Note: an N1 camera that's still powered on and paired to this NVR may be " +
+                    "re-added automatically by the NVR."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRemoveOffline = false
+                    vm.clearAllOfflineChannels()
+                }) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { showRemoveOffline = false }) { Text("Cancel") } },
+        )
+    }
+    if (showAddInfo) {
+        AlertDialog(
+            onDismissRequest = { showAddInfo = false },
+            confirmButton = { TextButton(onClick = { showAddInfo = false }) { Text("Got it") } },
+            title = { Text("Adding cameras") },
+            text = {
+                Text(
+                    "Scan LAN finds every ONVIF camera on the network (Hikvision, Dahua, " +
+                    "CP Plus, Axis, Vivotek, …) plus N1 cameras.\n\n" +
+                    "Use Add by IP for any camera that isn't discovered automatically, or " +
+                    "that doesn't advertise via ONVIF — enter its IP, protocol and credentials, " +
+                    "and pick the channel to bind it to."
+                )
+            },
+        )
+    }
+    if (showFoundInfo) {
+        AlertDialog(
+            onDismissRequest = { showFoundInfo = false },
+            confirmButton = { TextButton(onClick = { showFoundInfo = false }) { Text("Got it") } },
+            title = { Text("Discovering cameras") },
+            text = {
+                Text(
+                    "Tap \"Scan Cameras\" to discover cameras on the NVR's network automatically.\n\n" +
+                    "The scan finds ONVIF-compatible cameras (Hikvision, Dahua, CP Plus, Axis, …) " +
+                    "and N1 cameras. Use \"Add by IP\" for cameras not discovered automatically."
+                )
+            },
+        )
     }
     if (addingThirdParty) {
         val arr = vm.ipCamInfo
@@ -207,7 +292,8 @@ fun ManageScreen(vm: NvrViewModel) {
                 slots = arr,
                 onDismiss = { addingThirdParty = false },
                 onSave = { channelId, edits ->
-                    vm.saveIpCamEntry(channelId, edits) { addingThirdParty = false }
+                    addingThirdParty = false
+                    vm.saveIpCamEntry(channelId, edits)
                 },
             )
         } else {
@@ -217,14 +303,35 @@ fun ManageScreen(vm: NvrViewModel) {
 }
 
 @Composable
-private fun SectionHeader(text: String) {
-    Text(
-        text.uppercase(),
+private fun SectionHeader(
+    text: String,
+    onInfo: (() -> Unit)? = null,
+    action: (@Composable () -> Unit)? = null,
+) {
+    Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-        fontSize = 11.sp,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.primary,
-    )
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text.uppercase(),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        if (onInfo != null) {
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                Icons.Outlined.Info,
+                contentDescription = "About $text",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(15.dp).clickable { onInfo() },
+            )
+        }
+        if (action != null) {
+            Spacer(Modifier.weight(1f))
+            action()
+        }
+    }
 }
 
 @Composable
@@ -241,13 +348,22 @@ private fun HintRow(text: String) {
 }
 
 @Composable
-private fun ChannelRow(obj: JSONObject, onEdit: () -> Unit, onClear: () -> Unit) {
+private fun ChannelRow(
+    obj: JSONObject,
+    online: Boolean?,
+    status: String?,
+    duplicateOf: Int? = null,
+    onEdit: () -> Unit,
+    onClear: () -> Unit,
+) {
     val id = obj.optInt("ID")
     val ip = obj.optString("IPAddr")
     val model = obj.optString("Modelname")
     val protocol = obj.optString("Protocolname").uppercase()
     val enabled = obj.optString("Enable") == "True"
     val empty = ip.isBlank()
+    // online == null → status not fetched yet; show neutral.
+    val connecting = status.equals("Updating", ignoreCase = true)
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -277,11 +393,37 @@ private fun ChannelRow(obj: JSONObject, onEdit: () -> Unit, onClear: () -> Unit)
                     if (empty) "Empty slot" else (model.ifBlank { ip }),
                     fontWeight = FontWeight.SemiBold,
                 )
-                val subtitle = if (empty) "No camera assigned"
-                    else "$ip  •  $protocol  •  ${if (enabled) "enabled" else "disabled"}"
-                Text(subtitle,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (empty) {
+                    Text("No camera assigned",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    val (statusLabel, statusColor) = when {
+                        online == true -> "Online" to ArcisGreen
+                        connecting     -> "Connecting…" to MaterialTheme.colorScheme.onSurfaceVariant
+                        online == false -> "Offline" to MaterialTheme.colorScheme.error
+                        !enabled       -> "Disabled" to MaterialTheme.colorScheme.onSurfaceVariant
+                        else           -> "—" to MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(7.dp).clip(CircleShape).background(statusColor))
+                        Spacer(Modifier.width(5.dp))
+                        Text(statusLabel, fontSize = 12.sp, color = statusColor,
+                            fontWeight = FontWeight.Medium)
+                    }
+                    // IP + protocol on their own line so the protocol never wraps
+                    // awkwardly under the status pill.
+                    Text("$ip  ·  $protocol",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1)
+                    if (duplicateOf != null) {
+                        Text("⚠ same camera as Channel ${duplicateOf + 1}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
             IconButton(onClick = onEdit) {
                 Icon(Icons.Default.Edit, contentDescription = "Edit")
@@ -473,7 +615,7 @@ private fun EditIpcDialog(
                             readOnly = true,
                             label = { Text("Protocol") },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(protoOpen) },
-                            modifier = Modifier.fillMaxWidth().menuAnchor(),
+                            modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
                         )
                         ExposedDropdownMenu(
                             expanded = protoOpen,
@@ -593,7 +735,7 @@ private fun AddThirdPartyDialog(
                         readOnly = true,
                         label = { Text("Protocol") },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(protoOpen) },
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
                     )
                     ExposedDropdownMenu(
                         expanded = protoOpen,
@@ -616,6 +758,20 @@ private fun AddThirdPartyDialog(
                     label = { Text("Camera IP address") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+                // Warn if this IP is already bound to another channel — otherwise
+                // the same camera ends up on two channels (e.g. a typo'd IP that
+                // resolves to an already-added camera).
+                val dupCh = remember(ip, slotId) {
+                    if (ip.isBlank()) null
+                    else (0 until slots.length()).map { slots.getJSONObject(it) }
+                        .firstOrNull { it.optString("IPAddr") == ip && it.optInt("ID") != slotId }
+                        ?.optInt("ID")
+                }
+                if (dupCh != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("⚠ $ip is already on Channel ${dupCh + 1}. Adding it here binds the same camera to two channels.",
+                        fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                }
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(value = port, onValueChange = { port = it.filter(Char::isDigit) },
                     label = { Text("Port (RTSP usually 554)") }, singleLine = true,
@@ -663,7 +819,7 @@ private fun AddThirdPartyDialog(
                         readOnly = true,
                         label = { Text("Bind to channel") },
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(slotOpen) },
-                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
                     )
                     ExposedDropdownMenu(
                         expanded = slotOpen,

@@ -1,233 +1,372 @@
 package com.arcisai.nvr.ui.screens
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DesktopWindows
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.arcisai.nvr.ui.theme.AccentPurple
 import com.arcisai.nvr.ui.theme.ArcisGray
 import com.arcisai.nvr.ui.theme.ArcisGreen
+import com.arcisai.nvr.viewmodel.ChannelInfo
 import com.arcisai.nvr.viewmodel.NvrViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LiveTabScreen(vm: NvrViewModel, onChannelTap: (Int) -> Unit) {
-    // Re-fetch when the tab regains focus so channel re-assignments propagate.
+fun LiveTabScreen(
+    vm: NvrViewModel,
+    onChannelTap: (Int) -> Unit,
+    onOpenSettings: () -> Unit = {},
+    onOpenPlayback: () -> Unit = {},
+    onDisconnect: () -> Unit = {},
+) {
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 vm.refreshChannels()
                 vm.loadIpCamInfo()
+                vm.loadConnectedChannels()
             }
         }
         lifecycle.addObserver(obs)
         onDispose { lifecycle.removeObserver(obs) }
     }
+    LaunchedEffect(Unit) {
+        while (true) { vm.loadConnectedChannels(); kotlinx.coroutines.delay(8000) }
+    }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Live", fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.width(10.dp))
-                            StatusPill(online = vm.nvrOnline)
-                        }
-                        vm.credentials?.let {
-                            val sub = if (it.remote) "P2P · ${it.deviceId}" else "LAN · ${it.host}"
-                            Text(sub,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = {
-                        vm.refreshChannels(); vm.loadIpCamInfo()
-                    }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
-                    }
-                },
+    var displayName by rememberSaveable { mutableStateOf(vm.displayNvrName) }
+    LaunchedEffect(displayName) { vm.setDisplayNvrName(displayName) }
+
+    var showMenu by remember { mutableStateOf(false) }
+    var showEditDialog by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var editDraft by remember { mutableStateOf("") }
+
+    val onRefresh = { vm.refreshChannels(); vm.loadIpCamInfo(); vm.loadConnectedChannels(); Unit }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        // Page header
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 2.dp,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(
+                "Device",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
             )
-        },
-    ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            if (!vm.nvrOnline) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier.fillMaxWidth(),
+        }
+
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        when {
+            vm.channels.isEmpty() && vm.channelsError == null ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            vm.channelsError != null && vm.channels.isEmpty() ->
+                ErrorBlock(vm.channelsError!!) { vm.refreshChannels(); vm.loadIpCamInfo() }
+            else ->
+                DeviceCard(
+                    displayName = displayName,
+                    channels = vm.channels,
+                    showMenu = showMenu,
+                    onMenuOpen = { showMenu = true },
+                    onMenuDismiss = { showMenu = false },
+                    onRefresh = onRefresh,
+                    onMenuEdit = { editDraft = displayName; showEditDialog = true },
+                    onMenuSettings = onOpenSettings,
+                    onMenuDelete = { showDeleteConfirm = true },
+                    onChannelTap = onChannelTap,
+                    onPlaybackTap = onOpenPlayback,
+                )
+        }
+
+        // NVR offline banner — floats at the bottom of the inner Box
+        if (!vm.nvrOnline) {
+            Surface(
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.95f),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "NVR offline — reconnecting…  (showing last known channels)",
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        "NVR offline — reconnecting…",
+                        modifier = Modifier.weight(1f),
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onErrorContainer,
                     )
-                }
-            }
-            Box(modifier = Modifier.fillMaxSize()) {
-                when {
-                    vm.channels.isEmpty() && vm.channelsError == null ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
-                        }
-                    vm.channelsError != null && vm.channels.isEmpty() ->
-                        ErrorBlock(vm.channelsError!!) { vm.refreshChannels(); vm.loadIpCamInfo() }
-                    else ->
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(2),
-                            contentPadding = PaddingValues(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            items(vm.channels, key = { it.id }) { ch ->
-                                CameraTile(
-                                    channelNo = ch.id + 1,
-                                    title     = ch.modelName.ifBlank { "Channel ${ch.id + 1}" },
-                                    subtitle  = ch.ipAddr.ifBlank { "no camera assigned" },
-                                    enabled   = ch.enabled && ch.ipAddr.isNotBlank(),
-                                    onClick   = { onChannelTap(ch.id) },
-                                )
-                            }
-                        }
+                    TextButton(onClick = { vm.reconnectNow() }) { Text("Retry") }
                 }
             }
         }
+        } // end inner Box
+    } // end Column
+
+    if (showEditDialog) {
+        AlertDialog(
+            onDismissRequest = { showEditDialog = false },
+            title = { Text("Rename NVR") },
+            text = {
+                OutlinedTextField(
+                    value = editDraft,
+                    onValueChange = { editDraft = it },
+                    label = { Text("NVR name") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val saved = editDraft.trim().ifBlank { "NVR Device" }
+                    displayName = saved
+                    vm.setDisplayNvrName(saved)
+                    showEditDialog = false
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditDialog = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Remove NVR") },
+            text = { Text("This will disconnect from \"${displayName}\". You can reconnect by logging in again.") },
+            confirmButton = {
+                TextButton(onClick = { showDeleteConfirm = false; onDisconnect() }) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 
-@Composable
-private fun StatusPill(online: Boolean) {
-    val dot   = if (online) ArcisGreen else MaterialTheme.colorScheme.error
-    val label = if (online) "Online"   else "Offline"
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = dot.copy(alpha = 0.15f),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(dot))
-            Spacer(Modifier.width(4.dp))
-            Text(label, fontSize = 10.sp, color = dot, fontWeight = FontWeight.Medium)
-        }
-    }
-}
+// ─── Device card (matches reference app card layout) ────────────────────────
 
 @Composable
-private fun CameraTile(
-    channelNo: Int,
-    title: String,
-    subtitle: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
+private fun DeviceCard(
+    displayName: String,
+    channels: List<ChannelInfo>,
+    showMenu: Boolean,
+    onMenuOpen: () -> Unit,
+    onMenuDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onMenuEdit: () -> Unit,
+    onMenuSettings: () -> Unit,
+    onMenuDelete: () -> Unit,
+    onChannelTap: (Int) -> Unit,
+    @Suppress("UNUSED_PARAMETER") onPlaybackTap: () -> Unit,
 ) {
-    val tileGradient = if (enabled) {
-        Brush.linearGradient(listOf(Color(0xFF1F1635), Color(0xFF0E0A1E)))
-    } else {
-        Brush.linearGradient(listOf(Color(0xFF1E1E22), Color(0xFF121214)))
-    }
-    ElevatedCard(
+    val tapChannel = channels.firstOrNull { it.ipAddr.isNotBlank() }?.id ?: 0
+
+    Card(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(16f / 11f)
-            .clickable(enabled = enabled) { onClick() },
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
-        Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-            Box(
+        Column {
+            // ── Card header: device name + refresh + 3-dot menu ───────────────
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(tileGradient),
+                    .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Channel chip — top-left.
-                Surface(
-                    shape = RoundedCornerShape(50),
-                    color = Color.Black.copy(alpha = 0.55f),
-                    modifier = Modifier.padding(6.dp),
-                ) {
-                    Text("CH $channelNo",
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                        fontSize = 10.sp,
-                        color = Color.White,
-                        fontWeight = FontWeight.SemiBold)
-                }
-                // Online/offline dot — top-right.
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(10.dp)
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(if (enabled) ArcisGreen else ArcisGray),
+                Text(
+                    displayName,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                // Play / disabled icon — centered.
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (enabled) {
-                        Surface(
-                            shape = CircleShape,
-                            color = AccentPurple.copy(alpha = 0.85f),
-                        ) {
-                            Icon(
-                                Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.padding(8.dp).size(28.dp),
-                            )
-                        }
-                    } else {
-                        Icon(
-                            Icons.Default.VideocamOff,
-                            contentDescription = null,
-                            tint = Color.White.copy(alpha = 0.4f),
-                            modifier = Modifier.size(34.dp),
+                IconButton(onClick = onRefresh, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = "Refresh",
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Box {
+                    IconButton(onClick = onMenuOpen, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More options")
+                    }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = onMenuDismiss) {
+                        DropdownMenuItem(
+                            text = { Text("Settings") },
+                            leadingIcon = { Icon(Icons.Default.Settings, null) },
+                            onClick = { onMenuDismiss(); onMenuSettings() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Edit") },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = { onMenuDismiss(); onMenuEdit() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            leadingIcon = { Icon(Icons.Default.Delete, null) },
+                            onClick = { onMenuDismiss(); onMenuDelete() },
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            Text(title,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 13.sp,
-                maxLines = 1)
-            Text(subtitle,
-                fontSize = 11.sp,
+
+            // Channel-count subtitle — how many slots have a camera assigned.
+            Text(
+                "${channels.count { it.ipAddr.isNotBlank() }} of ${channels.size} channels",
+                modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 8.dp),
+                fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1)
+            )
+
+            // ── Single device preview — no per-channel loading, tap to go live ──
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .background(Color(0xFF0D0A1C))
+                    .clickable { onChannelTap(tapChannel) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.52f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = "Open live view",
+                            tint = Color.White,
+                            modifier = Modifier.size(34.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Tap to view live",
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.75f),
+                    )
+                }
+            }
+
         }
     }
 }
+
+// ─── Card action button ──────────────────────────────────────────────────────
+
+@Composable
+private fun CardActionButton(icon: ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .clickable(onClick = onClick)
+            .padding(horizontal = 28.dp, vertical = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(
+            icon, null,
+            modifier = Modifier.size(22.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface)
+    }
+}
+
+// ─── Stream diagram (camera ──●── monitor) ──────────────────────────────────
+
+@Composable
+private fun StreamDiagram(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .border(1.5.dp, Color.White.copy(alpha = 0.45f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Default.Videocam, null, tint = Color.White.copy(0.75f), modifier = Modifier.size(16.dp))
+        }
+        Spacer(Modifier.width(5.dp))
+        repeat(4) { i ->
+            Box(Modifier.width(5.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
+            if (i < 3) Spacer(Modifier.width(3.dp))
+        }
+        Spacer(Modifier.width(4.dp))
+        Box(Modifier.size(9.dp).clip(CircleShape).background(Color(0xFFE53935)))
+        Spacer(Modifier.width(4.dp))
+        repeat(4) { i ->
+            Box(Modifier.width(5.dp).height(2.dp).background(Color.White.copy(alpha = 0.3f)))
+            if (i < 3) Spacer(Modifier.width(3.dp))
+        }
+        Spacer(Modifier.width(5.dp))
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(CircleShape)
+                .border(1.5.dp, Color.White.copy(alpha = 0.45f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(Icons.Default.DesktopWindows, null, tint = Color.White.copy(0.75f), modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+// ─── Shared utility blocks ───────────────────────────────────────────────────
 
 @Composable
 internal fun ErrorBlock(msg: String, onRetry: () -> Unit) {
@@ -236,16 +375,16 @@ internal fun ErrorBlock(msg: String, onRetry: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(Icons.Default.VideocamOff,
+        Icon(
+            Icons.Default.VideocamOff,
             contentDescription = null,
             modifier = Modifier.size(48.dp),
-            tint = MaterialTheme.colorScheme.error)
+            tint = MaterialTheme.colorScheme.error,
+        )
         Spacer(Modifier.height(12.dp))
         Text("Couldn't reach the NVR", fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Text(msg,
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(msg, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(16.dp))
         Button(onClick = onRetry, shape = RoundedCornerShape(14.dp)) { Text("Retry") }
     }
@@ -258,15 +397,15 @@ internal fun EmptyBlock(title: String, body: String) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(Icons.Default.Videocam,
+        Icon(
+            Icons.Default.Videocam,
             contentDescription = null,
             modifier = Modifier.size(48.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Spacer(Modifier.height(12.dp))
         Text(title, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Text(body,
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(body, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

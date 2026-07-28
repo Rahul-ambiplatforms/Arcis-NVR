@@ -3,7 +3,7 @@ package com.arcisai.nvr.net
 import com.arcisai.nvr.data.NvrCredentials
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Credentials
+import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,14 +24,20 @@ import java.util.concurrent.TimeUnit
  */
 class NetSdkApi(val creds: NvrCredentials) {
 
+    // Shared auth state so a Digest challenge seen on one call is reused
+    // (preemptively) by the next, keeping later requests to one round trip.
+    private val digestState = DigestState()
+
     private val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .retryOnConnectionFailure(false)
+        // Preemptive Basic (unchanged for old firmware) + reactive Digest for
+        // Hikvision/Dahua-derived units that answer /netsdk with a Digest challenge.
+        .addInterceptor(PreemptiveAuthInterceptor(creds.username, creds.password, digestState))
+        .authenticator(DigestAuthenticator(creds.username, creds.password, digestState))
         .build()
-
-    private val authHeader = Credentials.basic(creds.username, creds.password)
 
     private fun urlOf(path: String): String {
         val cleanPath = if (path.startsWith("/")) path else "/$path"
@@ -41,7 +47,6 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun get(path: String): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(urlOf(path))
-            .header("Authorization", authHeader)
             .get()
             .build()
         client.newCall(req).execute().use { resp ->
@@ -54,7 +59,6 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun put(path: String, jsonBody: String = ""): String = withContext(Dispatchers.IO) {
         val req = Request.Builder()
             .url(urlOf(path))
-            .header("Authorization", authHeader)
             .put(jsonBody.toRequestBody(JSON_CT))
             .build()
         client.newCall(req).execute().use { resp ->
@@ -63,6 +67,26 @@ class NetSdkApi(val creds: NvrCredentials) {
             body
         }
     }
+
+    suspend fun post(path: String, jsonBody: String = ""): String = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(urlOf(path))
+            .post(jsonBody.toRequestBody(JSON_CT))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw NetSdkException(resp.code, body)
+            body
+        }
+    }
+
+    /** Delete a channel's camera binding — mirrors the NVR web UI's `DelIPC`:
+     *  POST /netsdk/Channel/IPCamInfo/<id> with {"Channel":"<id>","Enable":"False"}.
+     *  This is the firmware's real "remove channel" op; clearing the IPCamInfo
+     *  object via PUT does NOT delete (the slot re-populates). */
+    suspend fun delIpc(channelId: Int): String =
+        post("/netsdk/Channel/IPCamInfo/$channelId",
+            JSONObject().put("Channel", channelId.toString()).put("Enable", "False").toString())
 
     suspend fun getJson(path: String): JSONObject = JSONObject(get(path))
     suspend fun getJsonArray(path: String): JSONArray = JSONArray(get(path))
@@ -92,15 +116,39 @@ class NetSdkApi(val creds: NvrCredentials) {
     // Setting > Video
     // ------------------------------------------------------------------
     suspend fun streamConfig(): String = get("/netsdk/Stream")
+    suspend fun setStream(body: JSONObject): String = put("/netsdk/Stream", body.toString())
     suspend fun streamColor(): String = get("/netsdk/Stream/Color")
     suspend fun setStreamColor(body: String): String = put("/netsdk/Stream/Color", body)
     suspend fun streamEncode(): JSONArray = getJsonArray("/netsdk/Stream/Encode")
     suspend fun setStreamEncode(body: JSONArray): String =
         put("/netsdk/Stream/Encode", body.toString())
+    suspend fun setStreamIrcut(body: JSONArray): String =
+        put("/netsdk/Stream/Ircut", body.toString())
     suspend fun bitrate(): String = get("/netsdk/GetBitrate")
     suspend fun channelDetail(): String = get("/netsdk/GetChannelDetail")
     suspend fun ptzGet(): String = get("/netsdk/Channel/PTZ")
     suspend fun ptzSet(body: String): String = put("/netsdk/Channel/PTZ", body)
+
+    /** POST /netsdk/Preset (form-encoded).
+     *  op: "goto" | "set" | "delete", idx: 1-based preset slot. */
+    suspend fun preset(channel: Int, op: String, idx: Int = 1): String =
+        postForm("/netsdk/Preset", mapOf("chan" to channel.toString(), "op" to op, "idx" to idx.toString()))
+
+    private suspend fun postForm(path: String, params: Map<String, String>): String =
+        withContext(Dispatchers.IO) {
+            val formBody = FormBody.Builder()
+                .also { fb -> params.forEach { (k, v) -> fb.add(k, v) } }
+                .build()
+            val req = Request.Builder()
+                .url(urlOf(path))
+                .post(formBody)
+                .build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body?.string().orEmpty()
+                if (!resp.isSuccessful) throw NetSdkException(resp.code, body)
+                body
+            }
+        }
 
     // ------------------------------------------------------------------
     // Setting > Network
@@ -131,6 +179,8 @@ class NetSdkApi(val creds: NvrCredentials) {
     suspend fun generalTime(): JSONObject = getJson("/netsdk/General/Time")
     suspend fun setGeneralTime(body: JSONObject): String =
         put("/netsdk/General/Time", body.toString())
+    suspend fun setSystemTime(body: JSONObject): String =
+        put("/netsdk/R.SetSystemTime", body.toString())
     suspend fun generalMaintenance(): JSONObject = getJson("/netsdk/General/Maintenance")
     suspend fun setGeneralMaintenance(body: JSONObject): String =
         put("/netsdk/General/Maintenance", body.toString())
@@ -143,6 +193,22 @@ class NetSdkApi(val creds: NvrCredentials) {
     // ------------------------------------------------------------------
     suspend fun stat(): JSONObject = getJson("/netsdk/Stat")
     suspend fun statIpc(): String = get("/netsdk/Stat/IPC")
+
+    // ------------------------------------------------------------------
+    // Alarm / siren
+    // ------------------------------------------------------------------
+    // R.SoundManCtrl/R.AlarmLightManCtrl only accept GET (PUT → 404).
+    // R.Channel.TriggerAlarm accepts PUT, returns 200 "Save failure" (HDD absent) but triggers camera alarm.
+    suspend fun triggerSiren(channelId: Int, @Suppress("UNUSED_PARAMETER") durationSec: Int = 10): String =
+        put("/netsdk/R.Channel.TriggerAlarm",
+            JSONObject().put("ID", channelId).toString())
+
+    suspend fun stopSiren(): String = ""   // one-shot; camera stops after firmware timeout
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun triggerAlarmLight(channelId: Int, durationSec: Int = 10): String = ""
+
+    suspend fun stopAlarmLight(): String = ""
 
     // ------------------------------------------------------------------
     // Setting > Event / Record schedule

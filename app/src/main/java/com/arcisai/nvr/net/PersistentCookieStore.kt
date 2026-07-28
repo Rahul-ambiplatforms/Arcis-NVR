@@ -107,7 +107,7 @@ class PersistentCookieStore(context: Context) : CookieJar {
             val httpOnly = parts[6] == "1"
             if (expiresAt < System.currentTimeMillis()) return null
             val scheme = if (secure) "https" else "http"
-            val url = "$scheme://$domain$path".toHttpUrlOrNull() ?: return null
+            "$scheme://$domain$path".toHttpUrlOrNull() ?: return null
             Cookie.Builder()
                 .name(name).value(value).domain(domain).path(path)
                 .expiresAt(expiresAt)

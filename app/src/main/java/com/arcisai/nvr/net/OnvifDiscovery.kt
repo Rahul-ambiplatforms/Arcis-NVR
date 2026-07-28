@@ -109,7 +109,7 @@ object OnvifDiscovery {
      *  - <d:Scopes>onvif://www.onvif.org/manufacturer/<NAME> ...</d:Scopes>
      *      → manufacturer hint (used to suggest Protocolname)
      */
-    private fun parseProbeMatch(body: String, srcIp: String): JSONObject? {
+    private fun parseProbeMatch(body: String, @Suppress("UNUSED_PARAMETER") srcIp: String): JSONObject? {
         val xaddrs = Regex("<[a-zA-Z0-9]*:?XAddrs[^>]*>([^<]+)</[a-zA-Z0-9]*:?XAddrs>")
             .find(body)?.groupValues?.getOrNull(1)?.trim() ?: return null
         val firstUrl = xaddrs.split(Regex("\\s+")).firstOrNull { it.startsWith("http") } ?: return null

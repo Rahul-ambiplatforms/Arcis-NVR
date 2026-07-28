@@ -19,9 +19,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * buffer of `total_size` bytes and emitted when all offsets have been filled.
  */
 object ChunkProtocol {
-    // Match the NVR-side provider's MAX_UDP_PAYLOAD. Reduced from 1100 to 500
-    // because Indian carrier 5G LTE caps path MTU below ~1100 + IP/UDP headers,
-    // and libjuice sets IP_DONTFRAG (kernel returns EMSGSIZE on oversized UDP).
+    // MUST equal the DEPLOYED provider's MAX_UDP_PAYLOAD (provider_configurable.c).
+    // 500 bytes = 484-byte payload + 16-byte header → 528-byte IP packet.
+    // Keeps every UDP datagram well under the effective path MTU on mobile/ISP
+    // networks (observed: 1100-byte packets dropped, 199-byte packets arrive fine).
+    // Provider bitmap: chunk_index = offset / 484 → 0,1,2,... with no collisions.
     const val MAX_UDP_PAYLOAD = 500
     const val HEADER_SIZE     = 16
     const val MAX_CHUNK       = MAX_UDP_PAYLOAD - HEADER_SIZE   // 484
@@ -107,7 +109,7 @@ class Reassembler {
         }
 
         // Frame complete iff one merged range covers [0, totalSize).
-        return if (f.ranges.size == 1 && f.ranges.firstKey() == 0 && f.ranges.firstEntry().value == hdr.totalSize) {
+        return if (f.ranges.size == 1 && f.ranges.firstKey() == 0 && f.ranges.firstEntry()!!.value == hdr.totalSize) {
             frames.remove(hdr.connId)
             hdr.connId to f.buf
         } else null

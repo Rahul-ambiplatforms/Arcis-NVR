@@ -31,6 +31,33 @@ interface BackendApi {
     @GET("auth/logout")
     suspend fun logout(): GenericResponse
 
+    /** Create a new Arcis account. Password must be AES-encrypted like login.
+     *  On success the backend emails a registration OTP; the account stays
+     *  unusable until POST auth/verify confirms it. */
+    @POST("auth/register")
+    suspend fun register(@Body body: RegisterRequest): AuthResponse
+
+    /** Confirm the emailed registration OTP. Same endpoint the production
+     *  ArcisAI-Android client uses (`auth/verify`, body `{email, otp}`). */
+    @POST("auth/verify")
+    suspend fun verifyRegistration(@Body body: VerifyOtpRequest): AuthResponse
+
+    /** Re-send the registration OTP email. Body `{email}`. */
+    @POST("auth/resendOtp")
+    suspend fun resendOtp(@Body body: EmailRequest): AuthResponse
+
+    /** Kick off password reset. Backend emails a link
+     *  `view.arcisai.io/resetPassword/<token>` (token valid 15 min,
+     *  rate-limited to 1 request/min/email). Body `{email}`. */
+    @POST("auth/forgotPassword")
+    suspend fun forgotPassword(@Body body: EmailRequest): AuthResponse
+
+    /** Complete password reset with the emailed token. `password` and
+     *  `confirmPassword` are BOTH AES-encrypted (backend decrypts the same
+     *  way it does for login/register). Body `{token, password, confirmPassword}`. */
+    @POST("auth/resetPassword")
+    suspend fun resetPassword(@Body body: ResetPasswordRequest): AuthResponse
+
     // ---- ABD (NVR) management --------------------------------------------
     /** Add a new NVR (ABD) to the current account. Backend validates the
      *  deviceId against EMS first; will 404 if EMS doesn't know it, 403 if
@@ -84,6 +111,31 @@ data class LoginRequest(
     val email: String,
     val password: String,
     val rememberMe: Boolean = true,
+)
+
+/** Mirrors the production client's register body — password pre-encrypted
+ *  with [AESEncryption.encrypt], acceptedTerms always true (UI enforces). */
+data class RegisterRequest(
+    val name: String,
+    val mobile: String,
+    val email: String,
+    val password: String,
+    val acceptedTerms: Boolean = true,
+)
+
+data class VerifyOtpRequest(
+    val email: String,
+    val otp: String,
+)
+
+data class EmailRequest(
+    val email: String,
+)
+
+data class ResetPasswordRequest(
+    val token: String,
+    val password: String,
+    val confirmPassword: String,
 )
 
 data class AddAbdRequest(

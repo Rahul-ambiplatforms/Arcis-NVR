@@ -31,34 +31,42 @@ import com.arcisai.nvr.ui.theme.loginGradient
 import com.arcisai.nvr.viewmodel.NvrViewModel
 
 /**
- * Two flows on this screen:
- *   - LAN:    direct NVR IP + admin credentials → straight into the main app
- *   - Remote: Arcis cloud account (email/password) → MyNvrsScreen → pick NVR
+ * Cloud (Arcis account) login only.
  *
- * The Remote path's `onCloudAuth` lambda is what MainActivity uses to route
- * to the My-NVRs picker; the LAN path uses `onLanConnected` for the existing
- * direct-to-main flow.
+ * LAN direct-connect code is preserved in the block below and can be
+ * re-enabled by removing this file and restoring LoginScreen_LanBackup.kt.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
     vm: NvrViewModel,
-    onLanConnected: () -> Unit,
+    onLanConnected: () -> Unit,       // kept for nav graph compatibility; not used here
     onCloudAuthenticated: () -> Unit,
+    onNavigateToRegister: () -> Unit = {},
+    onNavigateToForgot: () -> Unit = {},
+    onNavigateToReset: () -> Unit = {},
 ) {
-    var remote      by remember { mutableStateOf(false) }
+    // A login that failed with "please verify your email" routes straight to
+    // the register screen's OTP step (ViewModel pre-set the email + re-sent
+    // the code).
+    LaunchedEffect(vm.pendingVerificationEmail) {
+        if (vm.pendingVerificationEmail != null) onNavigateToRegister()
+    }
+    // A password-reset deep link (view.arcisai.io/resetPassword/<token>) sets
+    // pendingResetToken — jump straight to the reset form.
+    LaunchedEffect(vm.pendingResetToken) {
+        if (vm.pendingResetToken != null) onNavigateToReset()
+    }
 
-    // LAN form state
-    var host        by remember { mutableStateOf("192.168.12.253") }
-    var port        by remember { mutableStateOf("80") }
-    var lanUser     by remember { mutableStateOf("admin") }
-    var lanPass     by remember { mutableStateOf("") }
-    var lanPassVis  by remember { mutableStateOf(false) }
-
-    // Cloud (remote) form state
-    var email       by remember { mutableStateOf("") }
-    var pwd         by remember { mutableStateOf("") }
-    var pwdVis      by remember { mutableStateOf(false) }
+    var remote     by remember { mutableStateOf(true) }
+    var email      by remember { mutableStateOf("") }
+    var pwd        by remember { mutableStateOf("") }
+    var pwdVis     by remember { mutableStateOf(false) }
+    var host       by remember { mutableStateOf("") }
+    var port       by remember { mutableStateOf("") }
+    var lanUser    by remember { mutableStateOf("") }
+    var lanPass    by remember { mutableStateOf("") }
+    var lanPassVis by remember { mutableStateOf(false) }
 
     Box(
         modifier = Modifier.fillMaxSize().background(loginGradient()),
@@ -85,24 +93,22 @@ fun LoginScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Text(
-                        if (remote) "Sign in" else "On this Wi-Fi",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 18.sp,
+                        if (remote) "Sign in" else "LAN Connect",
+                        fontWeight = FontWeight.SemiBold, fontSize = 18.sp,
+                    )
+                    SegmentedTabs(
+                        items = listOf("Cloud", "LAN"),
+                        selectedIndex = if (remote) 0 else 1,
+                        onSelect = { remote = it == 0 },
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     Text(
                         if (remote)
                             "Use your Arcis account. After signing in you'll see every NVR linked to your account."
                         else
-                            "Enter the NVR's IP address (printed on the box's LCD or shown on your router's clients list).",
+                            "Connect directly to your NVR on the local network.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    SegmentedTabs(
-                        items = listOf("LAN", "Remote (Account)"),
-                        selectedIndex = if (remote) 1 else 0,
-                        onSelect = { remote = (it == 1) },
-                        modifier = Modifier.fillMaxWidth(),
                     )
 
                     if (remote) {
@@ -129,10 +135,24 @@ fun LoginScreen(
                                 }
                             },
                         )
+                        Box(modifier = Modifier.fillMaxWidth()) {
+                            TextButton(
+                                onClick = {
+                                    vm.loginStatus = null
+                                    vm.authNotice = null
+                                    onNavigateToForgot()
+                                },
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                            ) {
+                                Text("Forgot password?", fontSize = 12.sp)
+                            }
+                        }
                     } else {
                         OutlinedTextField(
                             value = host, onValueChange = { host = it.trim() },
                             label = { Text("NVR IP address") }, singleLine = true,
+                            placeholder = { Text("e.g. 192.168.1.1") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
@@ -140,6 +160,7 @@ fun LoginScreen(
                         OutlinedTextField(
                             value = port, onValueChange = { port = it.filter(Char::isDigit) },
                             label = { Text("HTTP port") }, singleLine = true,
+                            placeholder = { Text("e.g. 80 or 8080") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -147,6 +168,7 @@ fun LoginScreen(
                         OutlinedTextField(
                             value = lanUser, onValueChange = { lanUser = it },
                             label = { Text("Username") }, singleLine = true,
+                            placeholder = { Text("admin") },
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                         )
@@ -161,7 +183,7 @@ fun LoginScreen(
                                 IconButton(onClick = { lanPassVis = !lanPassVis }) {
                                     Icon(
                                         imageVector = if (lanPassVis) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                        contentDescription = if (lanPassVis) "Hide password" else "Show password",
+                                        contentDescription = null,
                                     )
                                 }
                             },
@@ -170,6 +192,9 @@ fun LoginScreen(
 
                     vm.loginStatus?.let {
                         Text(it, color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                    }
+                    vm.authNotice?.let {
+                        Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
                     }
                     vm.remoteStatus?.let {
                         Text(it, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
@@ -182,12 +207,10 @@ fun LoginScreen(
                                 vm.accountLogin(email, pwd, onCloudAuthenticated)
                             } else {
                                 val p = port.toIntOrNull() ?: 80
-                                val creds = NvrCredentials(
-                                    host = host, port = p,
-                                    username = lanUser, password = lanPass,
-                                    remote = false,
+                                vm.login(
+                                    NvrCredentials(host = host, port = p, username = lanUser, password = lanPass, remote = false),
+                                    onLanConnected,
                                 )
-                                vm.login(creds, onLanConnected)
                             }
                         },
                         enabled = !vm.loginBusy && (
@@ -206,9 +229,21 @@ fun LoginScreen(
                         } else {
                             Text(
                                 if (remote) "Sign in" else "Connect",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                             )
+                        }
+                    }
+
+                    if (remote) {
+                        TextButton(
+                            onClick = {
+                                vm.loginStatus = null
+                                vm.authNotice = null
+                                onNavigateToRegister()
+                            },
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        ) {
+                            Text("New to Arcis?  Create account", fontSize = 13.sp)
                         }
                     }
                 }
@@ -263,3 +298,4 @@ private fun SegmentedTabs(
         }
     }
 }
+

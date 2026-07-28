@@ -1,0 +1,138 @@
+name: Release AAB + APK
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0). Leave blank to use version in build.gradle.kts.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release AAB + APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > app/arcisai-release.jks
+          # Fail loudly here rather than silently producing an unsigned build.
+          if [ ! -s app/arcisai-release.jks ]; then
+            echo "::error::Decoded keystore is empty - check the KEYSTORE_BASE64 secret."
+            exit 1
+          fi
+
+      # bundleRelease produces the AAB that Google Play requires for uploads;
+      # assembleRelease produces the APK attached to the GitHub Release for
+      # direct sideloading. KEYSTORE_PATH must be absolute: build.gradle.kts
+      # calls file() from the :app module, so a repo-relative path would
+      # resolve to app/app/... and leave the signingConfig unset.
+      - name: Build Release AAB + APK
+        run: ./gradlew bundleRelease assembleRelease --no-daemon
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/app/arcisai-release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+
+      # Guards against shipping a silently-unsigned build, which is what an
+      # unset KEYSTORE_PATH used to produce.
+      - name: Verify the release artifacts are signed
+        run: |
+          # The APK carries an APK Signature Scheme v2 block (not a v1 JAR
+          # signature, since minSdk is 26), so it needs apksigner to verify.
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "::error::apksigner not found under $ANDROID_HOME/build-tools."
+            exit 1
+          fi
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/release/*.apk
+
+          # AGP signs the AAB as a JAR, so it does carry a META-INF signature
+          # block; Play rejects the upload without one.
+          unzip -l app/build/outputs/bundle/release/*.aab \
+            | grep -qE 'META-INF/[^/]+\.(RSA|DSA|EC)$' \
+            || { echo "::error::AAB is not signed."; exit 1; }
+          echo "AAB signature block present."
+
+      - name: Extract version from build.gradle.kts
+        id: ver
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts)
+          VERSION_CODE=$(grep -oP 'versionCode\s*=\s*\K[0-9]+' app/build.gradle.kts)
+          echo "name=$VERSION_NAME"  >> $GITHUB_OUTPUT
+          echo "code=$VERSION_CODE"  >> $GITHUB_OUTPUT
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "ref=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            echo "ref=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=v${{ steps.ver.outputs.name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Rename artifacts with version
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          mv "$APK" "app/build/outputs/apk/release/ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk"
+          AAB=$(ls app/build/outputs/bundle/release/*.aab | head -1)
+          mv "$AAB" "app/build/outputs/bundle/release/ArcisAI-NVR-${{ steps.tag.outputs.ref }}.aab"
+
+      - name: Extract release notes from tag annotation
+        id: notes
+        run: |
+          BODY=$(git tag -l --format='%(contents)' "${{ steps.tag.outputs.ref }}" | tail -n +3)
+          if [ -z "$BODY" ]; then
+            BODY="No release notes provided."
+          fi
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY"     >> $GITHUB_OUTPUT
+          echo "EOF"       >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.ref }}
+          name: "ArcisAI NVR ${{ steps.tag.outputs.ref }}"
+          body: |
+            ## What's changed
+            ${{ steps.notes.outputs.body }}
+
+            ---
+            | Field        | Value |
+            |-------------|-------|
+            | Version Name | `${{ steps.ver.outputs.name }}` |
+            | Version Code | `${{ steps.ver.outputs.code }}` |
+
+            **Google Play upload:** use `ArcisAI-NVR-${{ steps.tag.outputs.ref }}.aab`
+            **Direct install / sideload:** use `ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk`
+          files: |
+            app/build/outputs/bundle/release/ArcisAI-NVR-${{ steps.tag.outputs.ref }}.aab
+            app/build/outputs/apk/release/ArcisAI-NVR-${{ steps.tag.outputs.ref }}.apk
+          draft: false
+          prerelease: false

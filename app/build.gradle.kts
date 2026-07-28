@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace = "com.arcisai.nvr"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.arcisai.nvr"
+        applicationId = "com.arcisainvr.app"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        targetSdk = 36
+        versionCode = 12
+        versionName = "0.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -26,6 +26,7 @@ android {
                 cppFlags  += "-std=c++17"
                 cFlags    += "-std=c11"
                 arguments += "-DANDROID_STL=c++_shared"
+                arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
         }
     }
@@ -37,12 +38,42 @@ android {
         }
     }
 
-    buildTypes {
-        debug {}
+    // Release signing — credentials read from environment variables so nothing
+    // sensitive lives in git. Required env vars for a release build:
+    //   KEYSTORE_PATH, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+    // If any are missing the release signingConfig is left unset and the build
+    // will fail explicitly at signing time (rather than silently producing an
+    // unsigned APK).
+    signingConfigs {
+        create("release") {
+            val ksPath = System.getenv("KEYSTORE_PATH")
+            val ksPwd  = System.getenv("KEYSTORE_PASSWORD")
+            val kAlias = System.getenv("KEY_ALIAS")
+            val kPwd   = System.getenv("KEY_PASSWORD")
+            if (!ksPath.isNullOrBlank() && !ksPwd.isNullOrBlank() &&
+                !kAlias.isNullOrBlank() && !kPwd.isNullOrBlank()) {
+                storeFile       = file(ksPath)
+                storePassword   = ksPwd
+                keyAlias        = kAlias
+                keyPassword     = kPwd
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
+    buildTypes {    
+        debug {
+            // Debug builds use Android's auto-generated debug keystore.
+            // Note: a debug-signed build can't install over a release-signed production app
+            // (INSTALL_FAILED_UPDATE_INCOMPATIBLE) — uninstall the production app first.
+        }
         release {
+            signingConfig  = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        
     }
 
     compileOptions {
@@ -87,11 +118,11 @@ dependencies {
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.8.2")
 
-    // Networking — OkHttp w/ Basic auth (NetSdkApi + publisher).
+    // Networking â€” OkHttp w/ Basic auth (NetSdkApi + publisher).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // Retrofit + Gson for the Arcis cloud backend (auth/login, abd/addAbd, abd/getAbd).
-    // HTTP-only cookie session — same shape the production ArcisAI-Android app uses.
+    // HTTP-only cookie session â€” same shape the production ArcisAI-Android app uses.
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
@@ -99,12 +130,12 @@ dependencies {
     // Encrypted creds storage
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // Media3 (ExoPlayer) — kept for HLS / DASH / playback; RTSP swapped to libVLC
+    // Media3 (ExoPlayer) â€” kept for HLS / DASH / playback; RTSP swapped to libVLC
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-exoplayer-rtsp:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
 
-    // libVLC — RTSP player (Media3's RTSP rejects SDPs without fmtp; camera doesn't send it)
+    // libVLC â€” RTSP player (Media3's RTSP rejects SDPs without fmtp; camera doesn't send it)
     implementation("org.videolan.android:libvlc-all:3.6.5")
 
     // Coroutines

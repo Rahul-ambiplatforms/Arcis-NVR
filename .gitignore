@@ -41,3 +41,6 @@ hs_err_pid*
 
 # Backups
 *.bak
+docs/ArcisAI_NVR_Features_and_Functionalities.docx
+docs/QC_Report_ArcisAI_NVR.md
+docs/QC_Report_ArcisAI_NVR.pdf

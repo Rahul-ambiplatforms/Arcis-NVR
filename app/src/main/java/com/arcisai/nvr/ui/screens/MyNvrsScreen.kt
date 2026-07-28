@@ -40,11 +40,26 @@ fun MyNvrsScreen(
     onLogout: () -> Unit,
 ) {
     LaunchedEffect(Unit) { vm.loadAbds() }
+    // Start pre-warming P2P as soon as the device list appears — by the time
+    // the user taps a device, ICE is often already done (saves 10-20 s).
+    LaunchedEffect(vm.myAbds) {
+        if (vm.myAbds.isNotEmpty()) vm.prewarmP2p(vm.myAbds.map { it.deviceId })
+    }
     var showAdd by remember { mutableStateOf(false) }
+    // Name of the NVR we're currently opening — drives the "Connecting…" dialog
+    // so a tap gives immediate feedback instead of looking like nothing happened
+    // during the (up to ~20 s) P2P handshake. Cleared when the attempt finishes.
+    var connectingName by remember { mutableStateOf<String?>(null) }
     val snack = remember { SnackbarHostState() }
     LaunchedEffect(vm.accountStatus) {
         vm.accountStatus?.takeIf { it.isNotBlank() }?.let { snack.showSnackbar(it) }
     }
+    // Surface a failed connect attempt (e.g. NVR really offline / unreachable).
+    LaunchedEffect(vm.loginStatus) {
+        vm.loginStatus?.takeIf { it.isNotBlank() }?.let { snack.showSnackbar(it) }
+    }
+    // The attempt ended (success navigates away; failure flips loginBusy false).
+    LaunchedEffect(vm.loginBusy) { if (!vm.loginBusy) connectingName = null }
 
     Scaffold(
         topBar = {
@@ -93,7 +108,12 @@ fun MyNvrsScreen(
                         contentPadding = PaddingValues(vertical = 8.dp),
                     ) {
                         items(vm.myAbds, key = { it.deviceId.ifBlank { it._id ?: it.name } }) { abd ->
-                            AbdRow(abd, onTap = {
+                            val online = abd.status.equals("online", ignoreCase = true) ||
+                                vm.sessionOnlineIds.contains(abd.deviceId)
+                            AbdRow(abd, online = online,
+                                channelCount = vm.channelCountCache[abd.deviceId] ?: abd.channel,
+                                enabled = !vm.loginBusy, onTap = {
+                                connectingName = abd.name.ifBlank { abd.deviceId }
                                 vm.selectAbd(abd, onNvrSelected)
                             })
                         }
@@ -101,6 +121,10 @@ fun MyNvrsScreen(
                     }
             }
         }
+    }
+
+    if (vm.loginBusy && connectingName != null) {
+        ConnectingDialog(name = connectingName!!, status = vm.remoteStatus)
     }
 
     if (showAdd) {
@@ -118,14 +142,13 @@ fun MyNvrsScreen(
 }
 
 @Composable
-private fun AbdRow(abd: AbdDto, onTap: () -> Unit) {
-    val online = abd.status.equals("online", ignoreCase = true)
+private fun AbdRow(abd: AbdDto, online: Boolean, channelCount: Int?, enabled: Boolean = true, onTap: () -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(14.dp))
-            .clickable { onTap() },
+            .clickable(enabled = enabled) { onTap() },
         tonalElevation = 1.dp,
     ) {
         Row(
@@ -147,7 +170,7 @@ private fun AbdRow(abd: AbdDto, onTap: () -> Unit) {
                 Text(abd.name.ifBlank { abd.deviceId }, fontWeight = FontWeight.SemiBold)
                 Text(
                     abd.deviceId + (abd.productType?.let { " · $it" } ?: "") +
-                        (abd.channel?.let { " · ${it} ch" } ?: ""),
+                        (channelCount?.let { " · $it ch" } ?: ""),
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -165,6 +188,32 @@ private fun AbdRow(abd: AbdDto, onTap: () -> Unit) {
             }
         }
     }
+}
+
+/** Blocking progress dialog shown while the P2P tunnel is being opened. The
+ *  NVR's backend status is often stale, so we always try to connect (rather
+ *  than blocking offline-marked NVRs) and just give the user clear feedback. */
+@Composable
+private fun ConnectingDialog(name: String, status: String?) {
+    AlertDialog(
+        onDismissRequest = { /* connection in progress — not dismissable */ },
+        confirmButton = {},
+        title = { Text("Connecting") },
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(14.dp))
+                Column {
+                    Text(name, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        status ?: "Connecting to NVR…",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+    )
 }
 
 @Composable

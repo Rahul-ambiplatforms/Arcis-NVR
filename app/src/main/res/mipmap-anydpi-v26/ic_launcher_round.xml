@@ -3,12 +3,12 @@
     <background android:drawable="@color/ic_launcher_background"/>
     <foreground>
         <inset
-            android:drawable="@mipmap/ic_launcher_foreground"
-            android:inset="18%" />
+            android:drawable="@drawable/arcisai_logo"
+            android:inset="25%" />
     </foreground>
     <monochrome>
         <inset
-            android:drawable="@mipmap/ic_launcher_foreground"
-            android:inset="18%" />
+            android:drawable="@drawable/arcisai_logo"
+            android:inset="25%" />
     </monochrome>
 </adaptive-icon>

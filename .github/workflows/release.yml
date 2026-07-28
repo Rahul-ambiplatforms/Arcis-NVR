@@ -105,11 +105,36 @@ jobs:
 
       - name: Extract release notes from tag annotation
         id: notes
+        env:
+          TAG: ${{ steps.tag.outputs.ref }}
         run: |
-          BODY=$(git tag -l --format='%(contents)' "${{ steps.tag.outputs.ref }}" | tail -n +3)
-          if [ -z "$BODY" ]; then
+          # actions/checkout creates refs/tags/<tag> pointing straight at the
+          # commit, so the annotated tag object is missing here and
+          # %(contents) silently falls back to the *commit* message - which is
+          # how a Co-Authored-By trailer ended up as the v0.2.1 release notes.
+          # Re-fetch the real tag object before reading the annotation.
+          git fetch --force --quiet origin "refs/tags/$TAG:refs/tags/$TAG" || true
+
+          BODY=""
+          if [ "$(git cat-file -t "$TAG" 2>/dev/null)" = "tag" ]; then
+            # Strip the tag object headers (up to the first blank line), then
+            # the subject line, then any leading blank lines.
+            BODY=$(git cat-file tag "$TAG" \
+              | sed '1,/^$/d' \
+              | tail -n +2 \
+              | sed -e '/./,$!d')
+          fi
+
+          # Git trailers are commit metadata, not release notes.
+          BODY=$(printf '%s\n' "$BODY" \
+            | grep -vEi '^(co-authored-by|signed-off-by|generated with):' \
+            | sed -e '/./,$!d')
+
+          if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
+            echo "::warning::No annotation body found on $TAG - tag with 'git tag -a' to get release notes."
             BODY="No release notes provided."
           fi
+
           echo "body<<EOF" >> $GITHUB_OUTPUT
           echo "$BODY"     >> $GITHUB_OUTPUT
           echo "EOF"       >> $GITHUB_OUTPUT
